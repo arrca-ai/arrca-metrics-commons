@@ -1,4 +1,3 @@
-// internal/metrics/identity_test.go
 package ingest
 
 import "testing"

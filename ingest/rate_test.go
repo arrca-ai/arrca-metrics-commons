@@ -1,4 +1,3 @@
-// internal/metrics/rate_test.go
 package ingest
 
 import (

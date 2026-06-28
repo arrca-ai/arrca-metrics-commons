@@ -1,4 +1,3 @@
-// internal/metrics/existence_test.go
 package ingest
 
 import (

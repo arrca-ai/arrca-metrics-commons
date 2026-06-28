@@ -1,4 +1,3 @@
-// internal/metrics/partition_test.go
 package ingest
 
 import (
