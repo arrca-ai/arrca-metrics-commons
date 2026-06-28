@@ -3,6 +3,12 @@ package events
 
 import "strconv"
 
+// Severity values are part of the g:anom row contract (graph-read + frontend read them).
+const (
+	SeverityRed    = "red"
+	SeverityYellow = "yellow"
+)
+
 // g:anom stream field names. These are the single source of truth shared by the
 // aggregator (writer) and graph-read (reader); both go through Encode/DecodeRow.
 const (
@@ -72,6 +78,10 @@ func DecodeRow(v map[string]interface{}) Event {
 		}
 		return ""
 	}
+	sev := get(fSeverity)
+	if sev == "" {
+		sev = SeverityYellow
+	}
 	return Event{
 		Source:     get(fSource),
 		Signal:     get(fSignal),
@@ -91,7 +101,7 @@ func DecodeRow(v map[string]interface{}) Event {
 		Reason:     get(fReason),
 		Container:  get(fContainer),
 		Desc:       get(fDesc),
-		Severity:   get(fSeverity),
+		Severity:   sev,
 	}
 }
 

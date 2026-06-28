@@ -56,3 +56,10 @@ func TestDecodeRowK8sPointEvent(t *testing.T) {
 		t.Fatalf("k8s fields wrong: %+v", e)
 	}
 }
+
+func TestDecodeRowDefaultsSeverityYellow(t *testing.T) {
+	e := DecodeRow(map[string]interface{}{"source": "metrics", "signal": "cpu", "state": StateOnset})
+	if e.Severity != SeverityYellow {
+		t.Fatalf("absent severity = %q, want %q (must match eventFromValues default)", e.Severity, SeverityYellow)
+	}
+}

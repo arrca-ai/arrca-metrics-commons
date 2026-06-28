@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
-// Package events is the anomaly wire + g:anom Redis row contract shared by the aggregator (writer) and graph-read (reader).
 package events
 
 import "encoding/json"
