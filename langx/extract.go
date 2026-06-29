@@ -24,12 +24,14 @@ type SeriesObs struct {
 	Counter               bool
 	Value                 float64
 	TsMs                  int64
+	Labels                map[string]string
 }
 
 // StaticObs is one folded, scaled static observation (string-formatted value).
 type StaticObs struct {
 	ID, Key, Unit, ValStr string
 	TsMs                  int64
+	Labels                map[string]string
 }
 
 // Extract decodes one OTLP export. exist filters orphans; rates holds
@@ -67,7 +69,7 @@ func Extract(data []byte, exist *ingest.ExistenceSet, rates *ingest.RateTracker,
 					if spec.Kind == langreg.KindStatic {
 						statics = append(statics, StaticObs{
 							ID: id, Key: f.Key, Unit: spec.Unit,
-							ValStr: strconv.FormatFloat(val, 'f', -1, 64), TsMs: f.TsMs,
+							ValStr: strconv.FormatFloat(val, 'f', -1, 64), TsMs: f.TsMs, Labels: f.Labels,
 						})
 						continue
 					}
@@ -80,7 +82,7 @@ func Extract(data []byte, exist *ingest.ExistenceSet, rates *ingest.RateTracker,
 					}
 					series = append(series, SeriesObs{
 						ID: id, Key: f.Key, Unit: spec.Unit, Source: spec.Source,
-						Counter: spec.Counter, Value: val, TsMs: f.TsMs,
+						Counter: spec.Counter, Value: val, TsMs: f.TsMs, Labels: f.Labels,
 					})
 				}
 			}
