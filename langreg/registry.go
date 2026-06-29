@@ -183,12 +183,20 @@ func (s Signal) identityLabels(attrs map[string]string) (map[string]string, bool
 }
 
 // AllSeriesKeys returns every possible stream key for series signals, sorted.
+// Note: for signals that declare Labels, the catalog lists the label-free base
+// key only; actual emitted keys include the {name=value} suffix, and
+// label-dimensioned series are discovered at runtime rather than enumerated here.
 func AllSeriesKeys() []string { return keysForKind(KindSeries) }
 
 // AllStaticKeys returns every possible key for static signals, sorted.
+// Note: for signals that declare Labels, the catalog lists the label-free base
+// key only; actual emitted keys include the {name=value} suffix, and
+// label-dimensioned series are discovered at runtime rather than enumerated here.
 func AllStaticKeys() []string { return keysForKind(KindStatic) }
 
 func keysForKind(kind string) []string {
+	// Note: signals declaring Labels emit base{name=value} keys at runtime;
+	// only the label-free base keys are enumerated here.
 	seen := map[string]struct{}{}
 	for _, s := range registry {
 		if s.Kind != kind {

@@ -27,6 +27,11 @@ func TestDecodeKey(t *testing.T) {
 	if base != "lag" || !reflect.DeepEqual(l, Labels{"topic": "orders", "partition": "3"}) {
 		t.Fatalf("decode wrong: %q %v", base, l)
 	}
+	// Guard: empty-brace keys decode to base with nil labels
+	base, l = DecodeKey("base{}")
+	if base != "base" || l != nil {
+		t.Fatalf("empty-brace decode wrong: %q %v", base, l)
+	}
 }
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
@@ -34,5 +39,10 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	base, out := DecodeKey(EncodeKey("jvm_nonheap_limit", in))
 	if base != "jvm_nonheap_limit" || !reflect.DeepEqual(out, in) {
 		t.Fatalf("round-trip wrong: %q %v", base, out)
+	}
+	// Empty label map round-trip: empty map → base → nil
+	base, out = DecodeKey(EncodeKey("base", Labels{}))
+	if base != "base" || out != nil {
+		t.Fatalf("empty-label round-trip wrong: %q %v", base, out)
 	}
 }
