@@ -44,15 +44,25 @@ type Signal struct {
 }
 ```
 
-`jvm.memory.limit` gains:
+`jvm.memory.limit` gains (Java 21, default G1 GC — these are `MemoryPoolMXBean.getName()`
+values, which the OTel agent reports verbatim as `jvm.memory.pool.name`):
 ```go
 Labels: []LabelSpec{{
     Name: "pool", Attr: "jvm.memory.pool.name",
-    Values: []string{"Metaspace", "Code Cache", "Compressed Class Space",
-                     "G1 Eden Space", "G1 Old Gen", "G1 Survivor Space"},
+    Values: []string{
+        // heap (G1)
+        "G1 Eden Space", "G1 Survivor Space", "G1 Old Gen",
+        // non-heap
+        "Metaspace", "Compressed Class Space",
+        "CodeHeap 'non-nmethods'", "CodeHeap 'profiled nmethods'", "CodeHeap 'non-profiled nmethods'",
+    },
 }},
 ```
-(Exact value strings to be confirmed against the live OTLP attribute values during implementation.)
+
+Notes:
+- Pool names are **GC-dependent** (G1 is the Java 21 default; ZGC/Parallel/Serial report different heap-pool names). The enumerated list targets the runtimes we run; unlisted values are dropped.
+- Java 21 uses **segmented code cache** (default since Java 9), so there is no `"Code Cache"` — it is the three `CodeHeap '...'` pools above. The two near-identical `~117 MB` non-heap values seen in the live data match two CodeHeap segments.
+- Heap and non-heap pools are **disjoint**: the impl groups by `(jvm.memory.type, pool)`, pairing heap pools with `jvm_heap_limit` and non-heap pools with `jvm_nonheap_limit`. Catalog enumeration of any nominal heap×non-heap-pool combo is harmless (no data is ever written there, so the reader probes empty and skips); the implementation may optionally scope `Values` per fold-type to avoid the dead combos.
 
 ## 5. Key encoding (single source of truth)
 
