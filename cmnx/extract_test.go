@@ -72,6 +72,54 @@ func buildPodExport(memWS float64, cpu1, cpu2 float64, t1, t2 int64) []byte {
 	return b
 }
 
+// buildNetExport builds a k8s.pod.network.io counter with receive+transmit
+// datapoints (pod:shop/payment-x2k).
+func buildNetExport(rxBytes, txBytes float64, tMs int64) []byte {
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	ra := rm.Resource().Attributes()
+	ra.PutStr("k8s.namespace.name", "shop")
+	ra.PutStr("k8s.pod.name", "payment-x2k")
+	sm := rm.ScopeMetrics().AppendEmpty()
+	net := sm.Metrics().AppendEmpty()
+	net.SetName("k8s.pod.network.io")
+	dps := net.SetEmptySum().DataPoints()
+	add := func(dir string, v float64) {
+		d := dps.AppendEmpty()
+		d.SetDoubleValue(v)
+		d.SetTimestamp(tsNano(tMs))
+		d.Attributes().PutStr("direction", dir)
+	}
+	add("receive", rxBytes)
+	add("transmit", txBytes)
+	req := pmetricotlp.NewExportRequestFromMetrics(md)
+	b, _ := req.MarshalProto()
+	return b
+}
+
+func TestExtractNetPerDirection(t *testing.T) {
+	exist := newTestExistence(t, "pod:shop/payment-x2k")
+	rates := ingest.NewRateTracker(time.Minute)
+	if _, _, err := Extract(buildNetExport(0, 0, 1000), exist, rates, time.Unix(1, 0)); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	series, _, err := Extract(buildNetExport(1000, 2000, 2000), exist, rates, time.Unix(2, 0))
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	byKey := map[string]SeriesObs{}
+	for _, s := range series {
+		byKey[s.Key] = s
+	}
+	rx, ok := byKey["net{direction=receive}"]
+	if !ok || rx.Labels["direction"] != "receive" {
+		t.Fatalf("net receive series missing/unlabeled: %+v", series)
+	}
+	if _, ok := byKey["net{direction=transmit}"]; !ok {
+		t.Fatalf("net transmit series missing: %+v", series)
+	}
+}
+
 // buildContainerMemLimitExport mirrors buildLimitExport in receiver_test.go.
 // container:shop/payment-x2k/app with k8s.container.memory_limit.
 func buildContainerMemLimitExport(limitBytes float64) []byte {

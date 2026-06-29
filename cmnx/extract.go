@@ -13,6 +13,7 @@ import (
 
 	"github.com/arrca-ai/arrca-metrics-commons/cmnreg"
 	"github.com/arrca-ai/arrca-metrics-commons/ingest"
+	"github.com/arrca-ai/arrca-metrics-commons/labels"
 )
 
 type SeriesObs struct {
@@ -20,6 +21,7 @@ type SeriesObs struct {
 	Counter               bool
 	Value                 float64
 	TsMs                  int64
+	Labels                map[string]string
 }
 
 type LimitObs struct {
@@ -69,10 +71,16 @@ func appendSeries(out []SeriesObs, spec cmnreg.MetricSpec, id string, m pmetric.
 	}
 	for i := 0; i < dps.Len(); i++ {
 		dp := dps.At(i)
-		key, ok := spec.ResolveKey(ingest.AttrGetter(dp.Attributes()))
+		getAttr := ingest.AttrGetter(dp.Attributes())
+		base, ok := spec.ResolveKey(getAttr)
 		if !ok {
 			continue
 		}
+		lbls, ok := spec.IdentityLabels(getAttr)
+		if !ok {
+			continue
+		}
+		key := labels.EncodeKey(base, lbls)
 		raw, ok := ingest.NumberValue(dp)
 		if !ok {
 			continue
@@ -87,7 +95,7 @@ func appendSeries(out []SeriesObs, spec cmnreg.MetricSpec, id string, m pmetric.
 			val = rate
 		}
 		val *= spec.EffScale()
-		out = append(out, SeriesObs{ID: id, Key: key, Unit: spec.Unit, Source: spec.Source, Counter: spec.Counter, Value: val, TsMs: tMs})
+		out = append(out, SeriesObs{ID: id, Key: key, Unit: spec.Unit, Source: spec.Source, Counter: spec.Counter, Value: val, TsMs: tMs, Labels: lbls})
 	}
 	return out
 }
