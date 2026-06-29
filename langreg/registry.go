@@ -3,7 +3,11 @@
 // Package langreg holds the runtime/web-language OTLP metric registry + coarse attribute fold.
 package langreg
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/arrca-ai/arrca-metrics-commons/labels"
+)
 
 // Sample is one numeric datapoint extracted from OTLP (decoupled from pdata so
 // folding is pure and table-testable).
@@ -16,9 +20,10 @@ type Sample struct {
 // Folded is one (key,value) after attribute folding. Value is the RAW summed
 // value; the receiver applies Scale and rate afterwards.
 type Folded struct {
-	Key   string
-	Value float64
-	TsMs  int64
+	Key    string
+	Value  float64
+	TsMs   int64
+	Labels map[string]string // identity labels (nil when the signal declares none)
 }
 
 // Signal kinds.
@@ -29,14 +34,15 @@ const (
 
 // Signal declares how one OTLP runtime metric is transformed and stored.
 type Signal struct {
-	Key      string            // stream/static key ("" requires FoldMap)
-	Unit     string            // render-ready unit: MB | count | cores | ratio | conns | /s | flags
-	Kind     string            // KindSeries | KindStatic
-	Counter  bool              // series only: counter→rate
-	FoldAttr string            // datapoint attr to fold by (e.g. jvm.memory.type)
-	FoldMap  map[string]string // fold attr value → key (sums datapoints sharing a value)
-	Scale    float64           // multiply final value; 0 = identity
-	Source   string            // g:lang meta "source": java | go | python | db-client
+	Key      string                  // stream/static key ("" requires FoldMap)
+	Unit     string                  // render-ready unit: MB | count | cores | ratio | conns | /s | flags
+	Kind     string                  // KindSeries | KindStatic
+	Counter  bool                    // series only: counter→rate
+	FoldAttr string                  // datapoint attr to fold by (e.g. jvm.memory.type)
+	FoldMap  map[string]string       // fold attr value → key (sums datapoints sharing a value)
+	Scale    float64                 // multiply final value; 0 = identity
+	Source   string                  // g:lang meta "source": java | go | python | db-client
+	Labels   []labels.LabelSpec      // identity-bearing labels (discovery model; values not enumerated)
 }
 
 const bytesToMB = 1.0 / (1024 * 1024)
@@ -54,7 +60,7 @@ var registry = map[string]Signal{
 	"jvm.cpu.time":                  {Key: "jvm_cpu", Unit: "cores", Kind: KindSeries, Counter: true, Source: "java"},
 	"queueSize":                     {Key: "queue_size", Unit: "count", Kind: KindSeries, Source: "java"},
 	// ---- Java / JVM (static) ----
-	"jvm.memory.limit": {Unit: "MB", Kind: KindStatic, FoldAttr: "jvm.memory.type", FoldMap: map[string]string{"heap": "jvm_heap_limit", "non_heap": "jvm_nonheap_limit"}, Scale: bytesToMB, Source: "java"},
+	"jvm.memory.limit": {Unit: "MB", Kind: KindStatic, FoldAttr: "jvm.memory.type", FoldMap: map[string]string{"heap": "jvm_heap_limit", "non_heap": "jvm_nonheap_limit"}, Scale: bytesToMB, Source: "java", Labels: []labels.LabelSpec{{Name: "pool", Attr: "jvm.memory.pool.name"}}},
 	"jvm.cpu.count":    {Key: "jvm_cpu_count", Unit: "count", Kind: KindStatic, Source: "java"},
 
 	// ---- DB-client pool (series) ----
@@ -99,7 +105,8 @@ func (s Signal) EffScale() float64 {
 // non-fold signal, each datapoint passes through under s.Key. Returned slice is
 // ordered by key for determinism. Values are RAW (scale applied by the receiver).
 func (s Signal) Fold(dps []Sample) []Folded {
-	if s.FoldAttr == "" {
+	// Fast path: no fold attr and no identity labels → passthrough per datapoint.
+	if s.FoldAttr == "" && len(s.Labels) == 0 {
 		if s.Key == "" {
 			return nil
 		}
@@ -110,22 +117,34 @@ func (s Signal) Fold(dps []Sample) []Folded {
 		return out
 	}
 	type acc struct {
+		lbls map[string]string
 		sum  float64
 		tsMs int64
 	}
 	m := map[string]*acc{}
 	for _, d := range dps {
-		v, ok := d.Attrs[s.FoldAttr]
-		if !ok {
+		base := s.Key
+		if s.FoldAttr != "" {
+			v, ok := d.Attrs[s.FoldAttr]
+			if !ok {
+				continue
+			}
+			base, ok = s.FoldMap[v]
+			if !ok {
+				continue
+			}
+		}
+		if base == "" {
 			continue
 		}
-		key, ok := s.FoldMap[v]
+		lbls, ok := s.identityLabels(d.Attrs)
 		if !ok {
-			continue
+			continue // a declared identity label's attr is missing → drop datapoint
 		}
+		key := labels.EncodeKey(base, lbls)
 		a := m[key]
 		if a == nil {
-			a = &acc{}
+			a = &acc{lbls: lbls}
 			m[key] = a
 		}
 		a.sum += d.Value
@@ -140,18 +159,44 @@ func (s Signal) Fold(dps []Sample) []Folded {
 	sort.Strings(keys)
 	out := make([]Folded, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, Folded{Key: k, Value: m[k].sum, TsMs: m[k].tsMs})
+		out = append(out, Folded{Key: k, Labels: m[k].lbls, Value: m[k].sum, TsMs: m[k].tsMs})
 	}
 	return out
 }
 
+// identityLabels extracts the declared identity labels from a datapoint's attrs.
+// ok=false if any declared label's attr is absent (caller drops the datapoint).
+// Returns nil when the signal declares no labels.
+func (s Signal) identityLabels(attrs map[string]string) (map[string]string, bool) {
+	if len(s.Labels) == 0 {
+		return nil, true
+	}
+	out := make(map[string]string, len(s.Labels))
+	for _, l := range s.Labels {
+		v, ok := attrs[l.Attr]
+		if !ok {
+			return nil, false
+		}
+		out[l.Name] = v
+	}
+	return out, true
+}
+
 // AllSeriesKeys returns every possible stream key for series signals, sorted.
+// Note: for signals that declare Labels, the catalog lists the label-free base
+// key only; actual emitted keys include the {name=value} suffix, and
+// label-dimensioned series are discovered at runtime rather than enumerated here.
 func AllSeriesKeys() []string { return keysForKind(KindSeries) }
 
 // AllStaticKeys returns every possible key for static signals, sorted.
+// Note: for signals that declare Labels, the catalog lists the label-free base
+// key only; actual emitted keys include the {name=value} suffix, and
+// label-dimensioned series are discovered at runtime rather than enumerated here.
 func AllStaticKeys() []string { return keysForKind(KindStatic) }
 
 func keysForKind(kind string) []string {
+	// Note: signals declaring Labels emit base{name=value} keys at runtime;
+	// only the label-free base keys are enumerated here.
 	seen := map[string]struct{}{}
 	for _, s := range registry {
 		if s.Kind != kind {
