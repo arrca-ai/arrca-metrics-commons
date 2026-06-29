@@ -1,121 +1,149 @@
-# Design: Labels as first-class series identity (runtime/langreg)
+# Design: Labels as first-class series identity (unified, discovery-based)
 
-> **Status:** designed (brainstormed + approved), NOT implemented.
-> **Primary repo:** `arrca-metrics-commons` (`langreg`, `langx`, `events`). Consumers: `metrics-analysis`, `arrca-graph` (graph-web-languages writer, graph-read reader).
+> **Status:** designed (brainstormed + approved), NOT implemented. Supersedes the
+> earlier enumerated-values draft of this file (discovery replaces enumeration).
+> **Primary repo:** `arrca-metrics-commons`. Consumers: `metrics-analysis`, `arrca-graph`.
 > **Date:** 2026-06-29
 
 ---
 
 ## 1. Problem
 
-A runtime series/static is currently identified by **(entity id, key)**, where `key` is a fixed string the registry produces (`jvm_heap_used`, `jvm_nonheap_limit`). Datapoint attributes (labels) are either folded away (summed by `jvm.memory.type`) or split into enumerated keys (`net_rx`/`net_tx`).
+A runtime series/static is identified today by **(entity id, key)** with a fixed,
+enumerable key. Datapoint attributes (labels) are handled four different,
+incompatible ways across the four extractors:
 
-This breaks when a label genuinely dimensions **distinct** series. `jvm.memory.limit` is emitted **per memory pool** (`jvm.memory.pool.name` = Metaspace, Code Cache, Compressed Class Space, G1 Eden/Old/Survivor). The fold keys only on `jvm.memory.type`, collapsing all non-heap pools onto one key `jvm_nonheap_limit`. Because the per-pool datapoints arrive un-summed (separate messages), the single key receives a different pool's value every scrape — observed as a permanent flip cycle `1024 → 117 → 5.5 → 117 → …` (3–4 flips per 30s scrape), flooding the timeline and rendering the chart as garbage.
+| Extractor | Dimension mechanism | Bounded? |
+|---|---|---|
+| `langreg` (runtime) | `FoldMap` — collapse pools by type (sum) | — |
+| `cmnreg` (infra) | `SplitMap` — split into enumerated keys (`net_rx`/`net_tx`) | bounded |
+| `kafkareg` (kafka) | `Dim` enum → `DimLabel` carried in the **`endpoint`** field | **unbounded** (topics) |
+| `redwin` (RED) | per-endpoint hash in the **`endpoint`** field | unbounded |
 
-The same class of bug is latent for any multi-dimensional metric (per-interface network, per-state CPU, per-pool anything).
+This fragmentation causes real bugs: `jvm.memory.limit` is per-pool, but `FoldMap`
+collapses all pools onto one key, so the single key receives a different pool's
+value every scrape — a permanent flip cycle that floods the timeline and garbles
+the chart. Any new multi-dimensional metric hits one of these idioms' limits.
 
 ## 2. Goal
 
-Make **data-point labels a first-class part of series identity**: identity = **(entity id, base key, label set)**. The registry declares which labels are identity-bearing **and enumerates their allowed values**, so the keyspace stays statically enumerable. A label value that isn't enumerated is dropped (with a logged count, not silently). Cardinality is bounded by construction.
+A **single, unified dimension model**: identity = **(entity id, base key, label
+map)**, carried structurally end-to-end, with **runtime discovery** of which
+series exist (no enumeration). This subsumes all four idioms — including the
+unbounded ones (kafka topics) that enumeration cannot express — so the problem
+does not recur for any future metric.
 
-**Initial application:** `jvm.memory.limit` (per pool). The capability is general but no other metric is migrated yet (YAGNI).
+## 3. Key decisions (approved)
 
-## 3. Why enumeration (not dynamic discovery)
+- **Discovery, not enumeration.** Registries declare identity labels by *attribute*
+  only; values are discovered at runtime. Reads use a per-entity index, not a
+  static key catalog. (Enumeration cannot represent unbounded kafka topics.)
+- **`endpoint` is subsumed into `labels`.** `events.Event.Endpoint` is replaced by
+  `Labels map[string]string`. RED endpoint becomes `{endpoint: <hash>}`; kafka
+  becomes `{topic, partition}`; JVM becomes `{pool}`. One concept everywhere.
+- **Phased rollout.** One shared core, then per-extractor adoption. Each phase is
+  its own spec → plan → implement cycle.
 
-The registry already hardcodes *which metric names* to listen to — it is the demux. Hardcoding the identity label *values* is consistent with that and has a decisive payoff: `AllSeriesKeys()`/`AllStaticKeys()` can generate `base × label-values`, so graph-read's existing "probe every registered key" reader keeps working **unchanged** — no per-entity index set, no `SCAN`, no reconciler, no reader rewrite. It also bounds cardinality and sidesteps the split-arrival problem (each pool lands in its own key regardless of whether datapoints arrive together).
+## 4. The unified primitive (commons)
 
-Trade-off accepted: pool names vary by GC algorithm / JVM version, so the enumerated `Values` list is maintained per metric; an unlisted value is dropped. Acceptable for a prototype where the runtimes are controlled, and a reasonable cardinality guard later.
+- **`Labels`** = `map[string]string` (label name → value), carried on every
+  observation, anomaly `Event`, stored row, and read snapshot.
+- **`encodeKey(base string, labels map[string]string) string`** — the ONE key
+  encoder, used by writers, the detector, and readers. No labels → `base`
+  unchanged. With labels → `base{n1=v1,n2=v2}` (names sorted; deterministic).
+  Round-trips via `decodeKey` (label values contain no `{}=,`).
+- **Registry label spec** — each registry's metric spec declares identity labels:
+  `[]LabelSpec{{Name, Attr}}` (no `Values`). Extraction groups datapoints by
+  `(base key, label tuple)` and emits one observation per group, carrying the
+  structured labels.
+- **Discovery index** — per namespace, per entity: `<ns>:keys:<id>` is `SADD`'d
+  with each series' encoded key on write; readers `SMEMBERS` it to learn which
+  series exist, then read each; a reconciler prunes stale members (mirrors the
+  existing `g:anom:ids` reconciler). Helpers live in commons so every store uses
+  the same logic.
 
-## 4. Registry change (`langreg`)
+## 5. Phased rollout
 
-```go
-// LabelSpec declares one identity-bearing datapoint label with an enumerated,
-// allow-listed set of values. A datapoint whose Attr value is not in Values is
-// dropped (counted, not silent).
-type LabelSpec struct {
-    Name   string   // short label name used in the encoded key + rendering, e.g. "pool"
-    Attr   string   // OTLP datapoint attribute, e.g. "jvm.memory.pool.name"
-    Values []string // enumerated allowed values
-}
+| Phase | Scope | Delivers |
+|---|---|---|
+| **0 — Commons core** | `Labels` type, `encodeKey`/`decodeKey`, registry `LabelSpec`, wire contract (`Event.Labels`, drop `Endpoint`), read-snapshot labels, discovery-index helpers + reconciler | Foundation; no behavior change on its own |
+| **1 — Runtime (`g:lang`)** | `langreg` label spec on `jvm.memory.limit`; `langx` carries labels; graph-web-languages writes encoded keys + index; graph-read discovers; web-languages-metric-analysis renders pool; **emitter `Observe` endpoint→labels (all analyzers)** | **Fixes the JVM pool bug**; proves the model end-to-end |
+| **2 — Kafka** | `kafkareg` `Dim`→labels (`topic`,`partition`); kafkax + graph-kafka + kafka analyzer | Kafka on the unified model; retire `Dim`/`DimLabel` |
+| **3 — CMN** | `cmnreg` `SplitMap`→labels (`direction`); fix `cmnx` no-sum latent risk; graph-metrics + cmn analyzer | Infra on the unified model |
+| **4 — RED** | `redwin` endpoint→`{endpoint}` label; graph-red + red analyzer | RED on the unified model; `endpoint` field fully retired |
 
-type Signal struct {
-    // ... existing fields (Key, Unit, Kind, Counter, FoldAttr, FoldMap, Scale, Source)
-    Labels []LabelSpec // identity-bearing labels; empty = today's behavior (unchanged)
-}
-```
+**Spec/plan Phase 0 + 1 together first** (foundation + the actual bug fix + an
+end-to-end proof). Phases 2–4 repeat the same adoption pattern, one spec each.
 
-`jvm.memory.limit` gains (Java 21, default G1 GC — these are `MemoryPoolMXBean.getName()`
-values, which the OTel agent reports verbatim as `jvm.memory.pool.name`):
-```go
-Labels: []LabelSpec{{
-    Name: "pool", Attr: "jvm.memory.pool.name",
-    Values: []string{
-        // heap (G1)
-        "G1 Eden Space", "G1 Survivor Space", "G1 Old Gen",
-        // non-heap
-        "Metaspace", "Compressed Class Space",
-        "CodeHeap 'non-nmethods'", "CodeHeap 'profiled nmethods'", "CodeHeap 'non-profiled nmethods'",
-    },
-}},
-```
+## 6. Phase 0 — Commons core (detailed)
 
-Notes:
-- Pool names are **GC-dependent** (G1 is the Java 21 default; ZGC/Parallel/Serial report different heap-pool names). The enumerated list targets the runtimes we run; unlisted values are dropped.
-- Java 21 uses **segmented code cache** (default since Java 9), so there is no `"Code Cache"` — it is the three `CodeHeap '...'` pools above. The two near-identical `~117 MB` non-heap values seen in the live data match two CodeHeap segments.
-- Heap and non-heap pools are **disjoint**: the impl groups by `(jvm.memory.type, pool)`, pairing heap pools with `jvm_heap_limit` and non-heap pools with `jvm_nonheap_limit`. Catalog enumeration of any nominal heap×non-heap-pool combo is harmless (no data is ever written there, so the reader probes empty and skips); the implementation may optionally scope `Values` per fold-type to avoid the dead combos.
+- `commons`: new `labels` package (or in `events`): `type Labels = map[string]string`;
+  `EncodeKey(base, Labels) string`; `DecodeKey(string) (base string, labels Labels)`.
+- `events.Event`: **remove** `Endpoint string`; **add** `Labels map[string]string
+  \`json:"labels,omitempty"\``. `EncodeRow`/`DecodeRow`: drop the `endpoint` field;
+  add a `labels` field (JSON-encoded map).
+- Registry label spec type `LabelSpec{Name, Attr string}` added to each registry's
+  spec struct (langreg/cmnreg/kafkareg/redwin) — empty in Phase 0, populated per
+  phase.
+- Discovery-index helpers in commons: `IndexKey(ns, id) string`,
+  and store-agnostic `RecordSeries`/`ListSeries`/`ReconcileIndex` building blocks.
+- TDD: encode/decode round-trip incl. endpoint-as-label and multi-label; row
+  codec carries labels and no longer carries endpoint.
 
-## 5. Key encoding (single source of truth)
+## 7. Phase 1 — Runtime (detailed)
 
-One shared function `encodeKey(base string, labels map[string]string) string` produces the canonical key and is used by **both** `Fold` (writer side) and the `AllSeriesKeys`/`AllStaticKeys` catalogs (reader-enumeration side), guaranteeing writer/reader agreement.
+- `langreg`: `Signal.Labels []LabelSpec`; `Fold` groups by `(base, labels)` and
+  emits `Folded{Key, Labels, Value, TsMs}` via `EncodeKey`; `jvm.memory.limit`
+  declares `{Name:"pool", Attr:"jvm.memory.pool.name"}`. (No `Values` — discovery.)
+- `langx`: `SeriesObs`/`StaticObs` gain `Labels`; `Extract` carries `Folded.Labels`.
+- `arrca-graph` graph-web-languages writer: store under the encoded key and `SADD`
+  the discovery index (`g:lang:keys:<id>`).
+- `arrca-graph` graph-read reader: replace `AllSeriesKeys`/`AllStaticKeys` probing
+  with index `SMEMBERS` → read each → return series with parsed `Labels`. Add the
+  index reconciler.
+- `metrics-analysis` emitter: `Observe(source, signal, entityID string, labels
+  map[string]string, value float64, tsMs int64, gateCount uint64)` (was
+  `endpoint string`); detector state keyed by `entityID + "|" + EncodeKey(signal,
+  labels)`. All four analyzer call sites updated; the runtime flip path carries
+  `st.Labels`; cmn/red/kafka call sites pass a one-entry label map wrapping their
+  current single dimension until their phase migrates them.
+- `metrics-analysis` render: label-aware runtime flip/spike phrasing (uses
+  `Event.Labels`).
+- TDD: `Fold` per-pool keys+labels; `Extract` multi-pool → one stable static per
+  pool; emitter detector keys differ per label set; render shows the pool.
 
-Format: `base` + `{` + sorted `name=value` joined by `,` + `}`, e.g. `jvm_nonheap_limit{pool=Metaspace}`. With `Labels` empty the key is just `base` (today's behavior, byte-for-byte). Label values are used verbatim (Redis keys/stream fields are binary-safe); enumerated pool names contain no `{`, `}`, `=`, `,`, so round-tripping is unambiguous.
+## 7a. Cross-cutting note: the shared emitter
 
-## 6. Fold / key generation
+`Emitter.Observe` is called by all four analyzers, so the `endpoint`→`labels`
+signature change lands once, in Phase 1, and every call site updates together.
+Not-yet-migrated analyzers pass their existing single dimension as a one-entry
+label map (e.g. RED `{"endpoint": epHash}`, kafka `{"dim": dimLabel}`) so behavior
+is preserved until their phase replaces it with the real structured labels.
 
-`Signal.Fold(dps)` groups datapoints by **(folded base key, tuple of identity-label values)** instead of base key alone, and returns `Folded{Key, Labels, Value, TsMs}` where `Key` is the encoded key and `Labels` is the structured map. Values sharing the same (base, labels) group are summed (handles duplicate datapoints); the latest TsMs wins. When `Labels` is empty the behavior is identical to today (existing `TestFoldSumsPoolsByType` must stay green).
+## 8. Non-goals / constraints
 
-`AllSeriesKeys()`/`AllStaticKeys()` enumerate `base × cartesian(Labels.Values)` via `encodeKey`, sorted.
+- No data migration — prototype; old `g:lang`/`g:anom` keys age out or are flushed.
+- No version tag, no deploy — develop via local `replace` directives; the owner
+  tags + rolls out per phase.
+- Frontend label rendering polish is in scope only as far as readers returning
+  structured labels; deeper UI work is deferred.
 
-## 7. Carry labels through the contract
+## 9. Testing strategy
 
-- `langx.StaticObs` / `langx.SeriesObs` gain `Labels map[string]string`.
-- `events.Event` gains `Labels map[string]string` (additive; prototype) so anomaly flips/spikes on a label-dimensioned signal can be rendered and queried with their label.
+Every phase is TDD. Core invariants:
+- `EncodeKey`/`DecodeKey` round-trip; empty labels == base (legacy keys unchanged).
+- Writer (`Fold`/extract) and reader (discovery) agree on keys.
+- Detector state is distinct per label set; identical inputs → identical keys/ids.
+- Per-extractor: a multi-dimensional payload yields one stable series per label
+  combination (no flip churn / no collapse).
 
-## 8. Storage & read (graph-web-languages / graph-read)
+## 10. Blast radius
 
-- The g:lang writer stores under the encoded key (static hash field / series stream key) — no logic change, it writes whatever `Key` it's given.
-- graph-read's reader is **unchanged for correctness**: the catalogs now enumerate the per-pool combos, so the probe-every-key loop reads them. The chart renders one stable line per pool.
-- **Optional polish (deferred):** surface structured labels in the read response (`StaticValue.Labels` / `Series` meta) so the frontend shows `pool=Metaspace` rather than the raw encoded key. Not required for correctness.
+| Repo | Phase 0 | Phase 1 |
+|---|---|---|
+| `arrca-metrics-commons` | `labels`/`events` core, registry `LabelSpec`, index helpers | `langreg` Fold+labels, `langx` carry-through |
+| `metrics-analysis` | consume core | emitter `Observe` labels, render, all call sites |
+| `arrca-graph` | — | graph-web-languages writer + index, graph-read discovery + reconciler |
 
-## 9. Anomaly / render (metrics-analysis)
-
-- The `jvm_*_limit` flip flood is fixed automatically: each pool is its own stable key, so `FlipTracker` (keyed `id|key`) stops churning — one flip only on a genuine change.
-- `render.go` gains label-aware phrasing for runtime flips/spikes (uses `events.Event.Labels`).
-- No change to the anomaly detector watch-list for the limit case (limits flow through the static-flip path, not `LookupSignal`).
-
-## 10. Non-goals (YAGNI)
-
-- No per-entity index set or `SCAN` discovery — enumeration makes it unnecessary.
-- `cmnreg`'s `SplitAttr`/`SplitMap` (network direction) and `jvm.memory.used` (summed pools) stay as-is. The `Labels` model is designed to subsume them later, but they are not touched now.
-- No data migration — prototype; old `g:lang`/`g:anom` keys age out via TTL or are flushed.
-
-## 11. Testing (TDD)
-
-- `encodeKey`: deterministic, sorted, empty-labels == base; round-trip unambiguous.
-- `Fold`: per-pool grouping → distinct `base{pool=...}` keys with correct `Labels`; unlisted pool value dropped; non-label signals unchanged (`TestFoldSumsPoolsByType` stays green).
-- catalogs: `AllStaticKeys`/`AllSeriesKeys` include the enumerated combos, sorted; writer (`Fold`) and catalog encodings are identical.
-- `langx.Extract`: a multi-pool `jvm.memory.limit` payload → one stable static per pool, each carrying `Labels`.
-- metrics-analysis: render shows the pool label on a runtime flip; existing flip/onset tests stay green.
-
-## 12. Rollout / mechanics
-
-- Develop across `arrca-metrics-commons`, `metrics-analysis`, and (if touched) `arrca-graph` using local `replace` directives so the unreleased commons is buildable/testable.
-- **Do not cut a commons version tag and do not deploy** — the owner does the tag + rollout (graph-web-languages, web-languages-metric-analysis, graph-read) when ready.
-
-## 13. Blast radius summary
-
-| Repo | Change |
-|---|---|
-| `arrca-metrics-commons` | `langreg` (LabelSpec, Signal.Labels, Fold, encodeKey, catalogs); `langx` (StaticObs/SeriesObs.Labels, Extract carry-through); `events` (Event.Labels) |
-| `metrics-analysis` | bump commons (replace dir during dev); `render.go` label-aware phrasing |
-| `arrca-graph` | likely zero for correctness; optional reader/frontend polish to surface structured labels |
+Later phases extend the same changes to `kafkareg`/`kafkax`/graph-kafka,
+`cmnreg`/`cmnx`/graph-metrics, `redwin`/graph-red and their analyzers.
