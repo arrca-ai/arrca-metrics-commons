@@ -60,7 +60,7 @@ var registry = map[string]Signal{
 	"jvm.cpu.time":                  {Key: "jvm_cpu", Unit: "cores", Kind: KindSeries, Counter: true, Source: "java"},
 	"queueSize":                     {Key: "queue_size", Unit: "count", Kind: KindSeries, Source: "java"},
 	// ---- Java / JVM (static) ----
-	"jvm.memory.limit": {Unit: "MB", Kind: KindStatic, FoldAttr: "jvm.memory.type", FoldMap: map[string]string{"heap": "jvm_heap_limit", "non_heap": "jvm_nonheap_limit"}, Scale: bytesToMB, Source: "java"},
+	"jvm.memory.limit": {Unit: "MB", Kind: KindStatic, FoldAttr: "jvm.memory.type", FoldMap: map[string]string{"heap": "jvm_heap_limit", "non_heap": "jvm_nonheap_limit"}, Scale: bytesToMB, Source: "java", Labels: []labels.LabelSpec{{Name: "pool", Attr: "jvm.memory.pool.name"}}},
 	"jvm.cpu.count":    {Key: "jvm_cpu_count", Unit: "count", Kind: KindStatic, Source: "java"},
 
 	// ---- DB-client pool (series) ----

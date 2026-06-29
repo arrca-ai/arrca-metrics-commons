@@ -109,3 +109,21 @@ func TestFoldSplitsByLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryLimitIsPerPool(t *testing.T) {
+	s, ok := Lookup("jvm.memory.limit")
+	if !ok || len(s.Labels) != 1 || s.Labels[0].Name != "pool" || s.Labels[0].Attr != "jvm.memory.pool.name" {
+		t.Fatalf("jvm.memory.limit must declare a pool label: %+v", s)
+	}
+	got := s.Fold([]Sample{
+		{Attrs: map[string]string{"jvm.memory.type": "non_heap", "jvm.memory.pool.name": "Metaspace"}, Value: 1, TsMs: 1},
+		{Attrs: map[string]string{"jvm.memory.type": "heap", "jvm.memory.pool.name": "G1 Old Gen"}, Value: 2, TsMs: 1},
+	})
+	keys := map[string]bool{}
+	for _, f := range got {
+		keys[f.Key] = true
+	}
+	if !keys["jvm_nonheap_limit{pool=Metaspace}"] || !keys["jvm_heap_limit{pool=G1 Old Gen}"] {
+		t.Fatalf("per-pool keys missing: %+v", got)
+	}
+}
