@@ -4,6 +4,8 @@ package langreg
 import (
 	"sort"
 	"testing"
+
+	"github.com/arrca-ai/arrca-metrics-commons/labels"
 )
 
 func TestLookupHitAndMiss(t *testing.T) {
@@ -76,6 +78,34 @@ func TestKeyCatalogs(t *testing.T) {
 	for _, a := range sk {
 		if has(AllStaticKeys(), a) {
 			t.Fatalf("key %s in both series and static catalogs", a)
+		}
+	}
+}
+
+func TestFoldSplitsByLabel(t *testing.T) {
+	s := Signal{
+		Kind: KindStatic, FoldAttr: "jvm.memory.type",
+		FoldMap: map[string]string{"non_heap": "jvm_nonheap_limit"},
+		Labels:  []labels.LabelSpec{{Name: "pool", Attr: "jvm.memory.pool.name"}},
+	}
+	got := s.Fold([]Sample{
+		{Attrs: map[string]string{"jvm.memory.type": "non_heap", "jvm.memory.pool.name": "Metaspace"}, Value: 1024, TsMs: 5},
+		{Attrs: map[string]string{"jvm.memory.type": "non_heap", "jvm.memory.pool.name": "Code Cache"}, Value: 117, TsMs: 5},
+		{Attrs: map[string]string{"jvm.memory.type": "non_heap"}, Value: 9, TsMs: 5}, // missing pool attr → dropped
+	})
+	if len(got) != 2 {
+		t.Fatalf("want 2 per-pool keys, got %d: %+v", len(got), got)
+	}
+	want := map[string]float64{
+		"jvm_nonheap_limit{pool=Metaspace}":  1024,
+		"jvm_nonheap_limit{pool=Code Cache}": 117,
+	}
+	for _, f := range got {
+		if want[f.Key] != f.Value {
+			t.Fatalf("key %s = %v, want %v", f.Key, f.Value, want[f.Key])
+		}
+		if f.Labels["pool"] == "" {
+			t.Fatalf("Folded.Labels not populated: %+v", f)
 		}
 	}
 }
