@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 package events
 
-import "strconv"
+import (
+	"encoding/json"
+	"strconv"
+)
 
 // Severity values are part of the g:anom row contract (graph-read + frontend read them).
 const (
@@ -31,6 +34,7 @@ const (
 	fNew        = "new"
 	fReason     = "reason"
 	fContainer  = "container"
+	fLabels     = "labels"
 )
 
 // EncodeRow returns the XADD field/value pairs for an event (Desc assumed already
@@ -66,6 +70,11 @@ func EncodeRow(e Event) []any {
 	if e.Container != "" {
 		vals = append(vals, fContainer, e.Container)
 	}
+	if len(e.Labels) > 0 {
+		if b, err := json.Marshal(e.Labels); err == nil {
+			vals = append(vals, fLabels, string(b))
+		}
+	}
 	return vals
 }
 
@@ -81,6 +90,10 @@ func DecodeRow(v map[string]interface{}) Event {
 	sev := get(fSeverity)
 	if sev == "" {
 		sev = SeverityYellow
+	}
+	var labels map[string]string
+	if s := get(fLabels); s != "" {
+		_ = json.Unmarshal([]byte(s), &labels)
 	}
 	return Event{
 		Source:     get(fSource),
@@ -102,6 +115,7 @@ func DecodeRow(v map[string]interface{}) Event {
 		Container:  get(fContainer),
 		Desc:       get(fDesc),
 		Severity:   sev,
+		Labels:     labels,
 	}
 }
 

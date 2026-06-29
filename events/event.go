@@ -36,6 +36,7 @@ type Event struct {
 	Container string `json:"container,omitempty"` // container name
 	Desc      string `json:"desc,omitempty"`      // rendered verbose description
 	Severity  string `json:"severity,omitempty"`  // "red" | "yellow"; stamped by the aggregator
+	Labels    map[string]string `json:"labels,omitempty"` // identity labels (pool, topic, endpoint…); read by renderers
 }
 
 // Marshal encodes the event for the wire / stream.
