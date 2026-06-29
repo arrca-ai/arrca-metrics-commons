@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 package events
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestEventRoundTrip(t *testing.T) {
 	in := Event{
@@ -18,11 +21,7 @@ func TestEventRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.EntityID != in.EntityID || out.Source != in.Source || out.Signal != in.Signal ||
-		out.Endpoint != in.Endpoint || out.State != in.State || out.Direction != in.Direction ||
-		out.Baseline != in.Baseline || out.Current != in.Current ||
-		out.DeltaAbs != in.DeltaAbs || out.DeltaRatio != in.DeltaRatio ||
-		out.Unit != in.Unit || out.TsMs != in.TsMs || out.IncidentID != in.IncidentID {
+	if !reflect.DeepEqual(out, in) {
 		t.Fatalf("round-trip mismatch:\n in=%+v\nout=%+v", in, out)
 	}
 }

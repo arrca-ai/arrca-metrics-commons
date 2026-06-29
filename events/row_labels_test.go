@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 package events
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestRowLabelsRoundTrip(t *testing.T) {
 	e := Event{
@@ -16,7 +19,7 @@ func TestRowLabelsRoundTrip(t *testing.T) {
 		fields[row[i].(string)] = row[i+1]
 	}
 	got := DecodeRow(fields)
-	if got.Labels["pool"] != "Metaspace" {
+	if !reflect.DeepEqual(got.Labels, e.Labels) {
 		t.Fatalf("labels did not round-trip: %+v", got.Labels)
 	}
 }
