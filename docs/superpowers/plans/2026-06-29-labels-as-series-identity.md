@@ -1,106 +1,129 @@
-# Labels as First-Class Series Identity — Implementation Plan
+# Labels as Series Identity — Plan: Phase 0 (Core) + Phase 1A (Runtime extraction)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make data-point labels identity-bearing for runtime metrics so per-pool `jvm.memory.limit` stores one stable series per pool (fixing the limit flip-flood and the chart), via enumerated label values that keep the keyspace statically enumerable.
+**Goal:** Build the unified label primitive in `arrca-metrics-commons` and make runtime extraction emit per-`(base key, label)` observations, so `jvm.memory.limit` produces one stable series per pool instead of a collapsed flapping key.
 
-**Architecture:** Extend `langreg` so a `Signal` may declare enumerated identity `Labels`; `Fold` groups datapoints by `(base key, label set)` and emits a canonical `base{name=value}` key; the key catalogs enumerate `base × values` so graph-read's existing reader is unchanged. `langx` carries the structured labels through; `events.Event` carries them on the wire for rendering. `metrics-analysis` consumes the new commons via a `replace` directive and renders the pool label.
+**Architecture:** A new leaf package `labels` holds the `Labels` type, `LabelSpec`, and the single `EncodeKey`/`DecodeKey` codec. `langreg` gains `Signal.Labels` and `Fold` groups datapoints by `(base, label set)` via `EncodeKey` (discovery model — labels declared by attribute, values NOT enumerated). `langx` carries the structured labels through `Extract`. `events.Event` gains `Labels` additively (the `Endpoint` field stays until Phase 1B retires it).
 
-**Tech Stack:** Go 1.25, `go.opentelemetry.io/collector/pdata` (OTLP), miniredis (tests). Repos: `arrca-metrics-commons` (Tasks 1–6), `metrics-analysis` (Task 7).
+**Tech Stack:** Go 1.x, `go.opentelemetry.io/collector/pdata`, miniredis (tests). Single repo: `arrca-metrics-commons`.
+
+**Scope:** Phase 0 + 1A only — all changes are in `arrca-metrics-commons` and leave it building+green and behaviorally unchanged for existing consumers (additive). **Phase 1B (the cross-repo consumer switch) is a separate plan**: emitter `Observe` endpoint→labels (metrics-analysis), graph-web-languages discovery index + graph-read discovery reader (arrca-graph), and dropping `events.Event.Endpoint`.
 
 ## Global Constraints
 
-- Spec: `arrca-metrics-commons/docs/superpowers/specs/2026-06-29-labels-as-series-identity-design.md`.
-- Empty `Labels` MUST preserve today's behavior byte-for-byte (`encodeKey(base, nil) == base`).
-- A single `encodeKey` is the ONE source of truth, used by both `Fold` (writer) and the catalogs (reader enumeration).
-- An identity-label value not in the enumerated `Values` causes the datapoint to be dropped.
-- No version tag, no deploy — develop via local `replace` directives only.
-- TDD: every change starts with a failing test. Commit after each task.
-- Commit messages end with: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
+- Spec: `docs/superpowers/specs/2026-06-29-labels-as-series-identity-design.md` (unified, discovery-based).
+- Discovery model: labels declared by **attribute only**, no enumerated `Values`. A declared label whose attr is absent on a datapoint → drop that datapoint.
+- `EncodeKey(base, nil) == base` (legacy keys unchanged); one codec used everywhere.
+- Phase 0/1A is **additive** — `go build ./... && go test ./...` in commons stays green; `events.Event.Endpoint` is NOT removed here.
+- TDD: failing test first. Commit after each task. Commit messages end with: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+- Run all commands from the `arrca-metrics-commons` repo root.
 
 ## File Structure
 
-- `arrca-metrics-commons/langreg/registry.go` — `LabelSpec`, `Signal.Labels`, `encodeKey`, `Folded.Labels`, `Fold` regroup, `identityLabels`/`contains`, `keysForKind`/`expandLabels`, `jvm.memory.limit` entry.
-- `arrca-metrics-commons/langreg/registry_test.go` — fold/encode/catalog tests.
-- `arrca-metrics-commons/langx/extract.go` — `SeriesObs.Labels`, `StaticObs.Labels`, carry `Folded.Labels` through.
-- `arrca-metrics-commons/langx/extract_test.go` — multi-pool Extract test + helper.
-- `arrca-metrics-commons/events/event.go` — `Event.Labels`.
-- `arrca-metrics-commons/events/row.go` — encode/decode `labels`.
-- `arrca-metrics-commons/events/row_test.go` — row round-trip test.
-- `metrics-analysis/go.mod` — `replace` directive.
-- `metrics-analysis/internal/anomaly/runtime.go` — `EventFromFlip` carries labels.
-- `metrics-analysis/internal/anomaly/render.go` — label-aware runtime-flip rendering.
-- `metrics-analysis/cmd/web-languages-metric-analysis/main.go` — pass `st.Labels` through.
-- `metrics-analysis/internal/anomaly/render_test.go` — labelled-flip render test.
-
-All commands below assume `cd` into the relevant repo root: `arrca-metrics-commons` for Tasks 1–6, `metrics-analysis` for Task 7.
+- Create: `labels/labels.go` — `Labels`, `LabelSpec`, `EncodeKey`, `DecodeKey`.
+- Create: `labels/labels_test.go`.
+- Modify: `events/event.go` — add `Event.Labels`.
+- Modify: `events/row.go` — encode/decode `labels` field.
+- Create: `events/row_labels_test.go`.
+- Modify: `langreg/registry.go` — `Signal.Labels`, `Folded.Labels`, `Fold` regroup, `identityLabels`, `jvm.memory.limit` entry, `labels` import.
+- Modify: `langreg/registry_test.go`.
+- Modify: `langx/extract.go` — `SeriesObs.Labels`, `StaticObs.Labels`, carry-through.
+- Modify: `langx/extract_test.go`.
 
 ---
 
-### Task 1: `encodeKey` + `LabelSpec` + `Signal.Labels`
+### Task 1: `labels` package — `EncodeKey`/`DecodeKey` + types
 
 **Files:**
-- Modify: `langreg/registry.go`
-- Test: `langreg/registry_test.go`
+- Create: `labels/labels.go`
+- Test: `labels/labels_test.go`
 
 **Interfaces:**
-- Produces: `type LabelSpec struct { Name, Attr string; Values []string }`; `Signal.Labels []LabelSpec`; `func encodeKey(base string, labels map[string]string) string`.
+- Produces: `type Labels = map[string]string`; `type LabelSpec struct { Name, Attr string }`; `func EncodeKey(base string, l Labels) string`; `func DecodeKey(s string) (string, Labels)`.
 
-- [ ] **Step 1: Write the failing test** — add to `langreg/registry_test.go`:
+- [ ] **Step 1: Write the failing test** — create `labels/labels_test.go`:
 
 ```go
+// SPDX-License-Identifier: Apache-2.0
+package labels
+
+import (
+	"reflect"
+	"testing"
+)
+
 func TestEncodeKey(t *testing.T) {
-	if got := encodeKey("jvm_nonheap_limit", nil); got != "jvm_nonheap_limit" {
+	if got := EncodeKey("jvm_nonheap_limit", nil); got != "jvm_nonheap_limit" {
+		t.Fatalf("nil labels must be base, got %q", got)
+	}
+	if got := EncodeKey("k", Labels{}); got != "k" {
 		t.Fatalf("empty labels must be base, got %q", got)
 	}
-	got := encodeKey("jvm_nonheap_limit", map[string]string{"pool": "Metaspace"})
-	if got != "jvm_nonheap_limit{pool=Metaspace}" {
-		t.Fatalf("single label wrong: %q", got)
+	if got := EncodeKey("lag", Labels{"topic": "orders", "partition": "3"}); got != "lag{partition=3,topic=orders}" {
+		t.Fatalf("labels must be sorted by name: %q", got)
 	}
-	// deterministic ordering regardless of map iteration
-	a := encodeKey("k", map[string]string{"y": "2", "x": "1"})
-	if a != "k{x=1,y=2}" {
-		t.Fatalf("labels must be sorted by name: %q", a)
+}
+
+func TestDecodeKey(t *testing.T) {
+	base, l := DecodeKey("jvm_nonheap_limit")
+	if base != "jvm_nonheap_limit" || len(l) != 0 {
+		t.Fatalf("no-label decode wrong: %q %v", base, l)
+	}
+	base, l = DecodeKey("lag{partition=3,topic=orders}")
+	if base != "lag" || !reflect.DeepEqual(l, Labels{"topic": "orders", "partition": "3"}) {
+		t.Fatalf("decode wrong: %q %v", base, l)
+	}
+}
+
+func TestEncodeDecodeRoundTrip(t *testing.T) {
+	in := Labels{"pool": "Compressed Class Space"}
+	base, out := DecodeKey(EncodeKey("jvm_nonheap_limit", in))
+	if base != "jvm_nonheap_limit" || !reflect.DeepEqual(out, in) {
+		t.Fatalf("round-trip wrong: %q %v", base, out)
 	}
 }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `go test ./langreg/ -run TestEncodeKey`
-Expected: FAIL — `undefined: encodeKey`.
+Run: `go test ./labels/`
+Expected: FAIL — `no required module provides package .../labels` / undefined symbols.
 
-- [ ] **Step 3: Add the type, field, and helper** — in `langreg/registry.go`, add `"strings"` to the import block, add the type above `Signal`, add the field to `Signal`, and add `encodeKey`:
+- [ ] **Step 3: Create the package** — `labels/labels.go`:
 
 ```go
-// LabelSpec declares one identity-bearing datapoint label with an enumerated,
-// allow-listed value set. A datapoint whose Attr value is not in Values is
-// dropped (it maps to no key).
+// SPDX-License-Identifier: Apache-2.0
+
+// Package labels is the identity-label primitive shared by every metric
+// registry, the anomaly wire contract, and the stores: a series is identified by
+// (entity, base key, Labels), and EncodeKey is the one canonical key codec.
+package labels
+
+import (
+	"sort"
+	"strings"
+)
+
+// Labels is an identity-bearing label set (label name → value).
+type Labels = map[string]string
+
+// LabelSpec declares one identity-bearing datapoint label. Values are discovered
+// at runtime (not enumerated): Attr is the OTLP datapoint attribute, Name is the
+// short label name used in keys and rendering.
 type LabelSpec struct {
-	Name   string   // short label name used in the key + rendering, e.g. "pool"
-	Attr   string   // OTLP datapoint attribute, e.g. "jvm.memory.pool.name"
-	Values []string // enumerated allowed values
+	Name string // short label name, e.g. "pool", "topic"
+	Attr string // OTLP datapoint attribute, e.g. "jvm.memory.pool.name"
 }
-```
 
-Add to `Signal` (after `Source`):
-
-```go
-	Labels []LabelSpec // identity-bearing labels; empty = legacy single-key behavior
-```
-
-Add the helper (near `EffScale`):
-
-```go
-// encodeKey builds the canonical key from a base key and an identity label set.
-// No labels → base unchanged (legacy keys). Labels are sorted by name for
-// determinism: base{n1=v1,n2=v2}. Used by BOTH Fold and the key catalogs.
-func encodeKey(base string, labels map[string]string) string {
-	if len(labels) == 0 {
+// EncodeKey builds the canonical key from a base key and a label set. No labels →
+// base unchanged. With labels → base{n1=v1,n2=v2} (names sorted; deterministic).
+func EncodeKey(base string, l Labels) string {
+	if len(l) == 0 {
 		return base
 	}
-	names := make([]string, 0, len(labels))
-	for n := range labels {
+	names := make([]string, 0, len(l))
+	for n := range l {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -113,38 +136,146 @@ func encodeKey(base string, labels map[string]string) string {
 		}
 		b.WriteString(n)
 		b.WriteByte('=')
-		b.WriteString(labels[n])
+		b.WriteString(l[n])
 	}
 	b.WriteByte('}')
 	return b.String()
+}
+
+// DecodeKey splits an encoded key back into base + labels. A key with no "{...}"
+// returns (key, nil). Label values contain no '{', '}', '=', ',' (enforced by
+// the attributes we key on), so the split is unambiguous.
+func DecodeKey(s string) (string, Labels) {
+	i := strings.IndexByte(s, '{')
+	if i < 0 || !strings.HasSuffix(s, "}") {
+		return s, nil
+	}
+	base := s[:i]
+	inner := s[i+1 : len(s)-1]
+	if inner == "" {
+		return base, nil
+	}
+	out := Labels{}
+	for _, pair := range strings.Split(inner, ",") {
+		eq := strings.IndexByte(pair, '=')
+		if eq < 0 {
+			continue
+		}
+		out[pair[:eq]] = pair[eq+1:]
+	}
+	return base, out
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `go test ./langreg/ -run TestEncodeKey`
+Run: `go test ./labels/`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add langreg/registry.go langreg/registry_test.go
-git commit -m "feat(langreg): add LabelSpec, Signal.Labels, encodeKey
+git add labels/labels.go labels/labels_test.go
+git commit -m "feat(labels): identity-label primitive + EncodeKey/DecodeKey
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 2: `Fold` groups by `(base, labels)`
+### Task 2: `events.Event.Labels` (additive) + row codec
+
+**Files:**
+- Modify: `events/event.go`, `events/row.go`
+- Test: `events/row_labels_test.go`
+
+**Interfaces:**
+- Produces: `Event.Labels map[string]string` (json `labels,omitempty`); `EncodeRow`/`DecodeRow` round-trip it under the `labels` field. `Endpoint` is unchanged (retired in Phase 1B).
+
+- [ ] **Step 1: Write the failing test** — create `events/row_labels_test.go`:
+
+```go
+// SPDX-License-Identifier: Apache-2.0
+package events
+
+import "testing"
+
+func TestRowLabelsRoundTrip(t *testing.T) {
+	e := Event{
+		EntityID: "container:default/auth-1/app", Source: "runtime",
+		Signal: "jvm_nonheap_limit{pool=Metaspace}", State: StateEvent,
+		Unit: "MB", TsMs: 1000, IncidentID: "abc", Old: "117", New: "1024",
+		Labels: map[string]string{"pool": "Metaspace"},
+	}
+	row := EncodeRow(e)
+	fields := map[string]interface{}{}
+	for i := 0; i+1 < len(row); i += 2 {
+		fields[row[i].(string)] = row[i+1]
+	}
+	got := DecodeRow(fields)
+	if got.Labels["pool"] != "Metaspace" {
+		t.Fatalf("labels did not round-trip: %+v", got.Labels)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./events/ -run TestRowLabelsRoundTrip`
+Expected: FAIL — `unknown field 'Labels' in struct literal of type Event`.
+
+- [ ] **Step 3: Add the field + codec** — in `events/event.go`, add to the `Event` struct after `Severity`:
+
+```go
+	Labels map[string]string `json:"labels,omitempty"` // identity labels (pool, topic, endpoint…); read by renderers
+```
+
+In `events/row.go`: add `"encoding/json"` to imports; add `fLabels = "labels"` to the const block; in `EncodeRow`, before `return vals`:
+
+```go
+	if len(e.Labels) > 0 {
+		if b, err := json.Marshal(e.Labels); err == nil {
+			vals = append(vals, fLabels, string(b))
+		}
+	}
+```
+
+In `DecodeRow`, before the `return Event{...}`:
+
+```go
+	var labels map[string]string
+	if s := get(fLabels); s != "" {
+		_ = json.Unmarshal([]byte(s), &labels)
+	}
+```
+
+and add `Labels: labels,` to the returned `Event{...}` literal.
+
+- [ ] **Step 4: Run tests to verify pass + no regressions**
+
+Run: `go test ./events/`
+Expected: PASS (existing row tests unaffected — `labels` is omitted when empty).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add events/event.go events/row.go events/row_labels_test.go
+git commit -m "feat(events): add Event.Labels + g:anom row carry (additive)
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 3: `langreg` — `Signal.Labels` + `Fold` groups by `(base, labels)`
 
 **Files:**
 - Modify: `langreg/registry.go`
 - Test: `langreg/registry_test.go`
 
 **Interfaces:**
-- Consumes: `encodeKey`, `Signal.Labels` (Task 1).
-- Produces: `Folded.Labels map[string]string`; `Fold` now emits one `Folded` per `(base, label-set)`; `func (s Signal) identityLabels(attrs map[string]string) (map[string]string, bool)`.
+- Consumes: `labels.EncodeKey`, `labels.LabelSpec` (Task 1).
+- Produces: `Signal.Labels []labels.LabelSpec`; `Folded.Labels map[string]string`; `Fold` emits one `Folded` per `(base, label set)`; `func (s Signal) identityLabels(attrs map[string]string) (map[string]string, bool)`.
 
 - [ ] **Step 1: Write the failing test** — add to `langreg/registry_test.go`:
 
@@ -153,13 +284,12 @@ func TestFoldSplitsByLabel(t *testing.T) {
 	s := Signal{
 		Kind: KindStatic, FoldAttr: "jvm.memory.type",
 		FoldMap: map[string]string{"non_heap": "jvm_nonheap_limit"},
-		Labels: []LabelSpec{{Name: "pool", Attr: "jvm.memory.pool.name",
-			Values: []string{"Metaspace", "Code Cache"}}},
+		Labels:  []labels.LabelSpec{{Name: "pool", Attr: "jvm.memory.pool.name"}},
 	}
 	got := s.Fold([]Sample{
 		{Attrs: map[string]string{"jvm.memory.type": "non_heap", "jvm.memory.pool.name": "Metaspace"}, Value: 1024, TsMs: 5},
 		{Attrs: map[string]string{"jvm.memory.type": "non_heap", "jvm.memory.pool.name": "Code Cache"}, Value: 117, TsMs: 5},
-		{Attrs: map[string]string{"jvm.memory.type": "non_heap", "jvm.memory.pool.name": "G1 Eden Space"}, Value: 9, TsMs: 5}, // unlisted → dropped
+		{Attrs: map[string]string{"jvm.memory.type": "non_heap"}, Value: 9, TsMs: 5}, // missing pool attr → dropped
 	})
 	if len(got) != 2 {
 		t.Fatalf("want 2 per-pool keys, got %d: %+v", len(got), got)
@@ -179,25 +309,34 @@ func TestFoldSplitsByLabel(t *testing.T) {
 }
 ```
 
+Add the import to `langreg/registry_test.go` (the test file `package langreg` block): `"github.com/arrca-ai/arrca-metrics-commons/labels"`.
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./langreg/ -run TestFoldSplitsByLabel`
-Expected: FAIL — `unknown field 'Labels' in struct literal of type Folded` (and/or wrong count).
+Expected: FAIL — `s.Labels undefined` / `unknown field 'Labels'`.
 
-- [ ] **Step 3: Add `Folded.Labels`, rewrite `Fold`, add helpers** — in `langreg/registry.go`:
+- [ ] **Step 3: Wire labels into the registry + Fold** — in `langreg/registry.go`:
 
-Add to `Folded`:
+Add the import `"github.com/arrca-ai/arrca-metrics-commons/labels"`.
+
+Add to `Signal` (after `Source`):
 
 ```go
-	Labels map[string]string // identity labels (nil when the signal has none)
+	Labels []labels.LabelSpec // identity-bearing labels (discovery model; values not enumerated)
 ```
 
-Replace the whole `Fold` method body with:
+Add to `Folded` (after `TsMs`):
+
+```go
+	Labels map[string]string // identity labels (nil when the signal declares none)
+```
+
+Replace the `Fold` method body with:
 
 ```go
 func (s Signal) Fold(dps []Sample) []Folded {
-	// Fast path: no fold attr and no identity labels → passthrough per datapoint
-	// (legacy behavior, no summing).
+	// Fast path: no fold attr and no identity labels → passthrough per datapoint.
 	if s.FoldAttr == "" && len(s.Labels) == 0 {
 		if s.Key == "" {
 			return nil
@@ -209,9 +348,9 @@ func (s Signal) Fold(dps []Sample) []Folded {
 		return out
 	}
 	type acc struct {
-		labels map[string]string
-		sum    float64
-		tsMs   int64
+		lbls map[string]string
+		sum  float64
+		tsMs int64
 	}
 	m := map[string]*acc{}
 	for _, d := range dps {
@@ -229,14 +368,14 @@ func (s Signal) Fold(dps []Sample) []Folded {
 		if base == "" {
 			continue
 		}
-		labels, ok := s.identityLabels(d.Attrs)
+		lbls, ok := s.identityLabels(d.Attrs)
 		if !ok {
-			continue // an identity label value is not enumerated → drop datapoint
+			continue // a declared identity label's attr is missing → drop datapoint
 		}
-		key := encodeKey(base, labels)
+		key := labels.EncodeKey(base, lbls)
 		a := m[key]
 		if a == nil {
-			a = &acc{labels: labels}
+			a = &acc{lbls: lbls}
 			m[key] = a
 		}
 		a.sum += d.Value
@@ -251,14 +390,14 @@ func (s Signal) Fold(dps []Sample) []Folded {
 	sort.Strings(keys)
 	out := make([]Folded, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, Folded{Key: k, Labels: m[k].labels, Value: m[k].sum, TsMs: m[k].tsMs})
+		out = append(out, Folded{Key: k, Labels: m[k].lbls, Value: m[k].sum, TsMs: m[k].tsMs})
 	}
 	return out
 }
 
-// identityLabels extracts the enumerated identity labels from a datapoint's
-// attrs. ok=false if any identity label's value is missing or not allow-listed
-// (caller must drop the datapoint). Returns nil when s declares no Labels.
+// identityLabels extracts the declared identity labels from a datapoint's attrs.
+// ok=false if any declared label's attr is absent (caller drops the datapoint).
+// Returns nil when the signal declares no labels.
 func (s Signal) identityLabels(attrs map[string]string) (map[string]string, bool) {
 	if len(s.Labels) == 0 {
 		return nil, true
@@ -266,152 +405,25 @@ func (s Signal) identityLabels(attrs map[string]string) (map[string]string, bool
 	out := make(map[string]string, len(s.Labels))
 	for _, l := range s.Labels {
 		v, ok := attrs[l.Attr]
-		if !ok || !contains(l.Values, v) {
+		if !ok {
 			return nil, false
 		}
 		out[l.Name] = v
 	}
 	return out, true
 }
-
-func contains(xs []string, x string) bool {
-	for _, v := range xs {
-		if v == x {
-			return true
-		}
-	}
-	return false
-}
 ```
 
 - [ ] **Step 4: Run tests to verify pass + no regressions**
 
 Run: `go test ./langreg/`
-Expected: PASS — including the existing `TestFoldSumsPoolsByType` (fold-no-labels still sums) and `TestFoldNonFoldPassThrough` (fast path).
+Expected: PASS — including existing `TestFoldSumsPoolsByType` (fold-no-labels still sums to one key per type) and `TestFoldNonFoldPassThrough` (fast path).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add langreg/registry.go langreg/registry_test.go
-git commit -m "feat(langreg): Fold groups by (base, identity labels)
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
-
----
-
-### Task 3: catalogs enumerate label combos
-
-**Files:**
-- Modify: `langreg/registry.go`
-- Test: `langreg/registry_test.go`
-
-**Interfaces:**
-- Consumes: `encodeKey`, `Signal.Labels` (Task 1).
-- Produces: `func expandLabels(base string, labels []LabelSpec) []string`; `AllSeriesKeys`/`AllStaticKeys` now include enumerated combos.
-
-- [ ] **Step 1: Write the failing test** — add to `langreg/registry_test.go`:
-
-```go
-func TestExpandLabels(t *testing.T) {
-	got := expandLabels("jvm_nonheap_limit", []LabelSpec{{
-		Name: "pool", Attr: "jvm.memory.pool.name", Values: []string{"Metaspace", "Code Cache"},
-	}})
-	want := map[string]bool{
-		"jvm_nonheap_limit{pool=Metaspace}":  true,
-		"jvm_nonheap_limit{pool=Code Cache}": true,
-	}
-	if len(got) != 2 {
-		t.Fatalf("want 2 expansions, got %v", got)
-	}
-	for _, k := range got {
-		if !want[k] {
-			t.Fatalf("unexpected key %q", k)
-		}
-	}
-	// no labels → just the base
-	if base := expandLabels("jvm_threads", nil); len(base) != 1 || base[0] != "jvm_threads" {
-		t.Fatalf("no-label expand must be [base], got %v", base)
-	}
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `go test ./langreg/ -run TestExpandLabels`
-Expected: FAIL — `undefined: expandLabels`.
-
-- [ ] **Step 3: Add `expandLabels` and rewrite `keysForKind`** — in `langreg/registry.go`, replace `keysForKind` and add `expandLabels`:
-
-```go
-func keysForKind(kind string) []string {
-	seen := map[string]struct{}{}
-	for _, s := range registry {
-		if s.Kind != kind {
-			continue
-		}
-		var bases []string
-		if s.FoldAttr == "" {
-			if s.Key != "" {
-				bases = append(bases, s.Key)
-			}
-		} else {
-			for _, k := range s.FoldMap {
-				bases = append(bases, k)
-			}
-		}
-		for _, base := range bases {
-			for _, key := range expandLabels(base, s.Labels) {
-				seen[key] = struct{}{}
-			}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for k := range seen {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// expandLabels returns every key for base across the cartesian product of the
-// signal's enumerated label values. No labels → [base]. (For multi-fold-value
-// signals this can yield nominal base×value combos that never receive data;
-// those keys simply read empty and are skipped — see spec §4.)
-func expandLabels(base string, labels []LabelSpec) []string {
-	combos := []map[string]string{{}}
-	for _, l := range labels {
-		next := make([]map[string]string, 0, len(combos)*len(l.Values))
-		for _, c := range combos {
-			for _, v := range l.Values {
-				nc := make(map[string]string, len(c)+1)
-				for k, vv := range c {
-					nc[k] = vv
-				}
-				nc[l.Name] = v
-				next = append(next, nc)
-			}
-		}
-		combos = next
-	}
-	out := make([]string, 0, len(combos))
-	for _, c := range combos {
-		out = append(out, encodeKey(base, c))
-	}
-	return out
-}
-```
-
-- [ ] **Step 4: Run tests to verify pass + no regressions**
-
-Run: `go test ./langreg/`
-Expected: PASS — including existing `TestKeyCatalogs` (still sorted, still disjoint; `jvm_heap_used`/`jvm_heap_limit` still present since those signals have no labels yet).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add langreg/registry.go langreg/registry_test.go
-git commit -m "feat(langreg): key catalogs enumerate label combos
+git commit -m "feat(langreg): Signal.Labels + Fold groups by (base, labels)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -425,27 +437,26 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `langreg/registry_test.go`
 
 **Interfaces:**
-- Consumes: `LabelSpec`, `Fold`, catalogs (Tasks 1–3).
+- Consumes: `Signal.Labels`, `Fold` (Task 3).
 
 - [ ] **Step 1: Write the failing test** — add to `langreg/registry_test.go`:
 
 ```go
 func TestMemoryLimitIsPerPool(t *testing.T) {
 	s, ok := Lookup("jvm.memory.limit")
-	if !ok || len(s.Labels) != 1 || s.Labels[0].Name != "pool" {
+	if !ok || len(s.Labels) != 1 || s.Labels[0].Name != "pool" || s.Labels[0].Attr != "jvm.memory.pool.name" {
 		t.Fatalf("jvm.memory.limit must declare a pool label: %+v", s)
 	}
-	// catalog includes the per-pool static keys
-	has := func(xs []string, want string) bool {
-		for _, x := range xs {
-			if x == want {
-				return true
-			}
-		}
-		return false
+	got := s.Fold([]Sample{
+		{Attrs: map[string]string{"jvm.memory.type": "non_heap", "jvm.memory.pool.name": "Metaspace"}, Value: 1, TsMs: 1},
+		{Attrs: map[string]string{"jvm.memory.type": "heap", "jvm.memory.pool.name": "G1 Old Gen"}, Value: 2, TsMs: 1},
+	})
+	keys := map[string]bool{}
+	for _, f := range got {
+		keys[f.Key] = true
 	}
-	if !has(AllStaticKeys(), "jvm_nonheap_limit{pool=Metaspace}") {
-		t.Fatalf("static catalog missing per-pool key: %v", AllStaticKeys())
+	if !keys["jvm_nonheap_limit{pool=Metaspace}"] || !keys["jvm_heap_limit{pool=G1 Old Gen}"] {
+		t.Fatalf("per-pool keys missing: %+v", got)
 	}
 }
 ```
@@ -458,26 +469,19 @@ Expected: FAIL — `len(s.Labels) != 1`.
 - [ ] **Step 3: Add `Labels` to the registry entry** — in `langreg/registry.go`, replace the `jvm.memory.limit` line with:
 
 ```go
-	"jvm.memory.limit": {Unit: "MB", Kind: KindStatic, FoldAttr: "jvm.memory.type", FoldMap: map[string]string{"heap": "jvm_heap_limit", "non_heap": "jvm_nonheap_limit"}, Scale: bytesToMB, Source: "java", Labels: []LabelSpec{{
-		Name: "pool", Attr: "jvm.memory.pool.name",
-		Values: []string{
-			"G1 Eden Space", "G1 Survivor Space", "G1 Old Gen",
-			"Metaspace", "Compressed Class Space",
-			"CodeHeap 'non-nmethods'", "CodeHeap 'profiled nmethods'", "CodeHeap 'non-profiled nmethods'",
-		},
-	}}},
+	"jvm.memory.limit": {Unit: "MB", Kind: KindStatic, FoldAttr: "jvm.memory.type", FoldMap: map[string]string{"heap": "jvm_heap_limit", "non_heap": "jvm_nonheap_limit"}, Scale: bytesToMB, Source: "java", Labels: []labels.LabelSpec{{Name: "pool", Attr: "jvm.memory.pool.name"}}},
 ```
 
 - [ ] **Step 4: Run tests to verify pass + no regressions**
 
 Run: `go test ./langreg/`
-Expected: PASS. Note `TestKeyCatalogs`' disjoint check still holds (per-pool static keys don't collide with series keys).
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add langreg/registry.go langreg/registry_test.go
-git commit -m "feat(langreg): per-pool labels on jvm.memory.limit (Java 21 G1)
+git commit -m "feat(langreg): per-pool label on jvm.memory.limit
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -491,8 +495,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `langx/extract_test.go`
 
 **Interfaces:**
-- Consumes: `Folded.Labels` (Task 2), per-pool `jvm.memory.limit` (Task 4).
-- Produces: `SeriesObs.Labels`, `StaticObs.Labels` (both `map[string]string`).
+- Consumes: `Folded.Labels` (Task 3), per-pool `jvm.memory.limit` (Task 4).
+- Produces: `SeriesObs.Labels`, `StaticObs.Labels` (`map[string]string`).
 
 - [ ] **Step 1: Write the failing test + helper** — add to `langx/extract_test.go`:
 
@@ -534,14 +538,11 @@ func TestExtractPerPoolLimit(t *testing.T) {
 		t.Fatalf("want 3 per-pool statics, got %d: %+v", len(byKey), statics)
 	}
 	meta, ok := byKey["jvm_nonheap_limit{pool=Metaspace}"]
-	if !ok {
-		t.Fatalf("missing Metaspace key: %v", statics)
-	}
-	if meta.Labels["pool"] != "Metaspace" {
-		t.Fatalf("StaticObs.Labels not populated: %+v", meta)
+	if !ok || meta.Labels["pool"] != "Metaspace" {
+		t.Fatalf("Metaspace static missing or unlabelled: %+v", statics)
 	}
 	if _, ok := byKey["jvm_heap_limit{pool=G1 Old Gen}"]; !ok {
-		t.Fatalf("missing heap pool key: %v", statics)
+		t.Fatalf("heap pool key missing: %+v", statics)
 	}
 }
 ```
@@ -549,11 +550,11 @@ func TestExtractPerPoolLimit(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./langx/ -run TestExtractPerPoolLimit`
-Expected: FAIL — `unknown field 'Labels'` (StaticObs has no Labels yet) / wrong count.
+Expected: FAIL — `unknown field 'Labels' in struct literal of type StaticObs`.
 
-- [ ] **Step 3: Add `Labels` to the obs structs and carry it through** — in `langx/extract.go`:
+- [ ] **Step 3: Add `Labels` to the obs structs + carry it** — in `langx/extract.go`:
 
-Change `SeriesObs` and `StaticObs` to add a `Labels` field:
+Replace the two struct definitions:
 
 ```go
 // SeriesObs is one folded, scaled, rate-adjusted time-series observation.
@@ -573,7 +574,7 @@ type StaticObs struct {
 }
 ```
 
-In `Extract`, set `Labels: f.Labels` in both append sites (the `KindStatic` branch and the series append):
+In `Extract`, set `Labels: f.Labels` in both append sites:
 
 ```go
 		if spec.Kind == langreg.KindStatic {
@@ -592,10 +593,10 @@ In `Extract`, set `Labels: f.Labels` in both append sites (the `KindStatic` bran
 		})
 ```
 
-- [ ] **Step 4: Run tests to verify pass + no regressions**
+- [ ] **Step 4: Run the full commons gate**
 
-Run: `go test ./langx/`
-Expected: PASS — including existing extract tests (their statics/series now carry `Labels: nil`, which is unused there).
+Run: `go build ./... && go test ./...`
+Expected: PASS across all packages — Phase 0/1A is additive, so `events`, `langreg`, `langx`, `cmnx`, `kafkax`, `redwin` all stay green.
 
 - [ ] **Step 5: Commit**
 
@@ -608,266 +609,23 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: `events.Event.Labels` on the wire + row codec
+## What Phase 0 + 1A delivers
 
-**Files:**
-- Modify: `events/event.go`, `events/row.go`
-- Test: `events/row_test.go`
+After Task 5, `langx.Extract` produces one stable `StaticObs` per JVM memory pool (`jvm_nonheap_limit{pool=Metaspace}`, …), each carrying structured `Labels` — the extraction-side fix for the flip-flood. Commons builds and tests green, and existing consumers are unaffected (everything is additive; `Endpoint` still exists).
 
-**Interfaces:**
-- Produces: `Event.Labels map[string]string` (json `labels,omitempty`); `EncodeRow`/`DecodeRow` round-trip it under the `labels` field.
+## Phase 1B — Consumers (next plan, not in this one)
 
-- [ ] **Step 1: Write the failing test** — add to `events/row_test.go` (create the file if absent, `package events`):
-
-```go
-package events
-
-import "testing"
-
-func TestRowLabelsRoundTrip(t *testing.T) {
-	e := Event{
-		EntityID: "container:default/auth-1/app", Source: "runtime",
-		Signal: "jvm_nonheap_limit{pool=Metaspace}", State: StateEvent,
-		Unit: "MB", TsMs: 1000, IncidentID: "abc",
-		Old: "117", New: "1024",
-		Labels: map[string]string{"pool": "Metaspace"},
-	}
-	row := EncodeRow(e)
-	fields := map[string]interface{}{}
-	for i := 0; i+1 < len(row); i += 2 {
-		fields[row[i].(string)] = row[i+1]
-	}
-	got := DecodeRow(fields)
-	if got.Labels["pool"] != "Metaspace" {
-		t.Fatalf("labels did not round-trip: %+v", got.Labels)
-	}
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `go test ./events/ -run TestRowLabelsRoundTrip`
-Expected: FAIL — `unknown field 'Labels' in struct literal of type Event`.
-
-- [ ] **Step 3: Add the field and codec support**
-
-In `events/event.go`, add to the `Event` struct (after `Severity`):
-
-```go
-	Labels map[string]string `json:"labels,omitempty"` // identity labels (e.g. pool); rendered by readers
-```
-
-In `events/row.go`: add `"encoding/json"` to imports, add the field-name const, encode, and decode.
-
-Add to the field-name `const` block:
-
-```go
-	fLabels = "labels"
-```
-
-In `EncodeRow`, before `return vals`, append:
-
-```go
-	if len(e.Labels) > 0 {
-		if b, err := json.Marshal(e.Labels); err == nil {
-			vals = append(vals, fLabels, string(b))
-		}
-	}
-```
-
-In `DecodeRow`, before the `return Event{...}`, add:
-
-```go
-	var labels map[string]string
-	if s := get(fLabels); s != "" {
-		_ = json.Unmarshal([]byte(s), &labels)
-	}
-```
-
-and add `Labels: labels,` to the returned `Event{...}` literal.
-
-- [ ] **Step 4: Run tests to verify pass + no regressions**
-
-Run: `go test ./events/`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add events/event.go events/row.go events/row_test.go
-git commit -m "feat(events): carry identity Labels on Event + g:anom row
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
-
----
-
-### Task 7: `metrics-analysis` consumes new commons + renders the label
-
-**Repo:** `metrics-analysis` (cd into it).
-
-**Files:**
-- Modify: `go.mod`
-- Modify: `internal/anomaly/runtime.go`
-- Modify: `cmd/web-languages-metric-analysis/main.go`
-- Modify: `internal/anomaly/render.go`
-- Test: `internal/anomaly/render_test.go`
-
-**Interfaces:**
-- Consumes: `langx.StaticObs.Labels`, `events.Event.Labels` (Tasks 5–6).
-- Produces: `EventFromFlip(entityID, signal, unit, oldVal, newVal string, labels map[string]string, tsMs int64) events.Event` (labels param added before tsMs).
-
-- [ ] **Step 1: Point at local commons via `replace`**
-
-Run:
-```bash
-go mod edit -replace github.com/arrca-ai/arrca-metrics-commons=../arrca-metrics-commons
-go mod tidy
-```
-Expected: `go.mod` gains a `replace ... => ../arrca-metrics-commons` line; build still resolves.
-
-- [ ] **Step 2: Write the failing render test** — add to `internal/anomaly/render_test.go`:
-
-```go
-func TestRenderRuntimeFlipWithPoolLabel(t *testing.T) {
-	e := events.Event{
-		EntityID: "container:default/auth-1/app", Source: "runtime",
-		Signal: "jvm_nonheap_limit{pool=Metaspace}", State: events.StateEvent,
-		Unit: "MB", Old: "117", New: "1024",
-		Labels: map[string]string{"pool": "Metaspace"},
-	}
-	s := Render(e)
-	if !strings.Contains(s, "JVM max non-heap") || !strings.Contains(s, "Metaspace") {
-		t.Fatalf("expected base label + pool in desc, got %q", s)
-	}
-	if !strings.Contains(s, "117 MB") || !strings.Contains(s, "1024 MB") {
-		t.Fatalf("flip values missing: %q", s)
-	}
-}
-```
-
-- [ ] **Step 3: Run test to verify it fails**
-
-Run: `go test ./internal/anomaly/ -run TestRenderRuntimeFlipWithPoolLabel`
-Expected: FAIL — desc renders the raw encoded signal (`jvm_nonheap_limit{pool=Metaspace}`), not "JVM max non-heap … Metaspace".
-
-- [ ] **Step 4: Make `render.go` label-aware** — in `internal/anomaly/render.go`, replace `renderRuntimeFlip` and add two helpers (`strings` is already imported):
-
-```go
-// renderRuntimeFlip renders a static config-value change (point event), with any
-// identity labels (e.g. memory pool) appended.
-func renderRuntimeFlip(e events.Event) string {
-	old, _ := strconv.ParseFloat(e.Old, 64)
-	nw, _ := strconv.ParseFloat(e.New, 64)
-	return fmt.Sprintf("%s%s changed %s → %s%s",
-		runtimeLabel(baseSignal(e.Signal)), labelSuffix(e.Labels),
-		formatValue(old, e.Unit), formatValue(nw, e.Unit), suffixEntity(e.EntityID))
-}
-
-// baseSignal strips any encoded label suffix: "jvm_nonheap_limit{pool=X}" → "jvm_nonheap_limit".
-func baseSignal(sig string) string {
-	if i := strings.IndexByte(sig, '{'); i >= 0 {
-		return sig[:i]
-	}
-	return sig
-}
-
-// labelSuffix formats identity labels for a description: " (pool Metaspace)".
-func labelSuffix(labels map[string]string) string {
-	if len(labels) == 0 {
-		return ""
-	}
-	names := make([]string, 0, len(labels))
-	for n := range labels {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	parts := make([]string, 0, len(names))
-	for _, n := range names {
-		parts = append(parts, n+" "+labels[n])
-	}
-	return " (" + strings.Join(parts, ", ") + ")"
-}
-```
-
-Add `"sort"` to the `render.go` import block.
-
-- [ ] **Step 5: Run the render test + existing render tests**
-
-Run: `go test ./internal/anomaly/ -run TestRender`
-Expected: PASS — including `TestRenderRuntimeStaticFlipUnchanged` (no labels → `baseSignal` is a no-op, `labelSuffix` empty → identical output).
-
-- [ ] **Step 6: Thread labels from extraction into the flip event** — in `internal/anomaly/runtime.go`, change `EventFromFlip` to accept and set labels:
-
-```go
-func EventFromFlip(entityID, signal, unit, oldVal, newVal string, labels map[string]string, tsMs int64) events.Event {
-	return events.Event{
-		EntityID:   entityID,
-		Source:     "runtime",
-		Signal:     signal,
-		State:      events.StateEvent,
-		Unit:       unit,
-		TsMs:       tsMs,
-		Old:        oldVal,
-		New:        newVal,
-		Labels:     labels,
-		IncidentID: flipEventID(entityID, signal, newVal, tsMs),
-	}
-}
-```
-
-In `cmd/web-languages-metric-analysis/main.go`, update `staticPublisher.ObserveStatic` to take and pass labels, and the call site to pass `st.Labels`:
-
-```go
-func (p *staticPublisher) ObserveStatic(entityID, signal, unit, oldVal, newVal string, labels map[string]string, tsMs int64) {
-	ev := anomaly.EventFromFlip(entityID, signal, unit, oldVal, newVal, labels, tsMs)
-	data, err := ev.Marshal()
-	if err != nil {
-		return
-	}
-	p.publish(p.subjectPrefix+"."+itoa(events.Partition(entityID, p.n)), data)
-}
-```
-
-Call site (in `handle`):
-
-```go
-		for _, st := range statics {
-			if prev, changed := flips.Observe(st.ID+"|"+st.Key, st.ValStr, time.UnixMilli(st.TsMs)); changed {
-				staticPub.ObserveStatic(st.ID, st.Key, st.Unit, prev, st.ValStr, st.Labels, st.TsMs)
-			}
-		}
-```
-
-- [ ] **Step 7: Update the existing `EventFromFlip` callers in tests** — search and fix any test calling the old signature:
-
-Run: `grep -rn "EventFromFlip(" internal/ cmd/`
-For each call lacking the labels arg, insert `nil` before the final `tsMs` argument (e.g. `EventFromFlip("id","jvm_heap_limit","MB","512","1024", nil, 1000)`).
-
-- [ ] **Step 8: Full gate**
-
-Run: `go build ./... && go vet ./... && go test ./...`
-Expected: PASS, no vet warnings.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add go.mod go.sum internal/anomaly/runtime.go internal/anomaly/render.go internal/anomaly/render_test.go cmd/web-languages-metric-analysis/main.go
-git commit -m "feat(anomaly): consume per-pool labels; render pool on runtime flips
-
-Local replace -> ../arrca-metrics-commons (no version tag yet).
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
-
----
+The end-to-end fix needs the consumers, planned separately because it spans two more repos and the riskiest single edit:
+- **metrics-analysis:** `Emitter.Observe(... endpoint string ...)` → `... labels map[string]string ...`; detector key `id|labels.EncodeKey(signal, labels)`; update all four analyzer call sites (web-languages passes `st.Labels`; cmn `nil`; red `{"endpoint": s.Endpoint}`; kafka `{"dim": s.DimLabel}` transitional); thread `st.Labels` into `EventFromFlip`; label-aware `render.go`.
+- **arrca-graph:** graph-web-languages `WriteSeries`/`WriteStatic` add a per-entity series index (`g:lang:keys:<id>` SADD) for series; graph-read reader discovers via the index + present static hash fields (replacing `AllSeriesKeys`/`AllStaticKeys`), returning parsed `Labels`; add the index reconciler.
+- **commons:** remove `events.Event.Endpoint` once no consumer references it (carry `Labels` only).
 
 ## Self-Review
 
-**Spec coverage:** §4 registry shape → Tasks 1,4. §5 key encoding → Task 1. §6 Fold/key-gen → Tasks 2,3. §7 carry labels (StaticObs/SeriesObs + Event) → Tasks 5,6. §8 storage/read unchanged → satisfied by enumerable catalogs (Task 3; graph-read untouched). §9 anomaly/render → Task 7. §10 non-goals → nothing touches `cmnreg`/`jvm.memory.used`/discovery. §11 testing → each task is TDD. §12 rollout (replace dir, no tag/deploy) → Task 7 Step 1; no deploy step anywhere.
+**Spec coverage (Phase 0+1A portion):** §4 primitive (`Labels`, `EncodeKey`/`DecodeKey`, `LabelSpec`) → Task 1; wire contract `Event.Labels` → Task 2; §6 registry `LabelSpec` → Task 3; §7 `langreg` Fold+labels → Tasks 3–4, `langx` carry-through → Task 5. Discovery index, reader switch, emitter endpoint→labels, and `Endpoint` removal are explicitly Phase 1B (separate plan) — not silently dropped.
 
-**Placeholder scan:** none — every code step shows full code; the `grep`-and-fix step (Task 7 Step 7) is mechanical with an explicit transformation.
+**Placeholder scan:** none — every code step shows complete code.
 
-**Type consistency:** `encodeKey(string, map[string]string) string` used identically in Tasks 1/2/3. `Folded.Labels`/`StaticObs.Labels`/`SeriesObs.Labels`/`Event.Labels` are all `map[string]string`. `EventFromFlip` new signature (labels before tsMs) is applied at its definition (Task 7 Step 6) and all call sites (Steps 6–7).
+**Type consistency:** `Labels`/`map[string]string` used uniformly; `labels.EncodeKey(string, Labels) string` called identically in Task 3 and (next plan) the emitter; `Folded.Labels`/`StaticObs.Labels`/`SeriesObs.Labels`/`Event.Labels` are all `map[string]string`; `identityLabels` returns `(map[string]string, bool)` and is called once in `Fold`.
 
-**Scope:** single subsystem (runtime label identity), one plan. graph-read frontend polish is explicitly deferred (spec §8) and not a task.
+**Scope:** single repo, additive, independently green — a clean first sub-project; Phase 1B is the next.
