@@ -8,6 +8,27 @@ import (
 	"github.com/arrca-ai/arrca-metrics-commons/ingest"
 )
 
+func TestNetIsLabeledByDirection(t *testing.T) {
+	s, ok := Lookup("k8s.pod.network.io")
+	if !ok || s.Key != "net" || len(s.Labels) != 1 || s.Labels[0].Name != "direction" || s.Labels[0].Attr != "direction" {
+		t.Fatalf("net must be base 'net' + {direction} label: %+v", s)
+	}
+	get := func(m map[string]string) func(string) (string, bool) {
+		return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+	}
+	lbls, ok := s.IdentityLabels(get(map[string]string{"direction": "receive"}))
+	if !ok || lbls["direction"] != "receive" {
+		t.Fatalf("IdentityLabels wrong: %v %v", lbls, ok)
+	}
+	if _, ok := s.IdentityLabels(get(map[string]string{})); ok {
+		t.Fatalf("missing direction attr must drop (ok=false)")
+	}
+	cpu, _ := Lookup("container.cpu.time")
+	if l, ok := cpu.IdentityLabels(get(map[string]string{})); !ok || l != nil {
+		t.Fatalf("unlabeled metric must yield (nil,true): %v %v", l, ok)
+	}
+}
+
 func TestLookup_ClaimedAndDropped(t *testing.T) {
 	if _, ok := Lookup("container.cpu.time"); !ok {
 		t.Fatal("container.cpu.time should be claimed")
@@ -22,39 +43,6 @@ func TestResolveKey_NonSplit(t *testing.T) {
 	k, ok := s.ResolveKey(func(string) (string, bool) { return "", false })
 	if !ok || k != "cpu" {
 		t.Fatalf("got (%q,%v), want (cpu,true)", k, ok)
-	}
-}
-
-func TestResolveKey_SplitDirection(t *testing.T) {
-	s, _ := Lookup("k8s.pod.network.io")
-	// transmit direction
-	get := func(k string) (string, bool) {
-		if k == "direction" {
-			return "transmit", true
-		}
-		return "", false
-	}
-	k, ok := s.ResolveKey(get)
-	if !ok || k != "net_tx" {
-		t.Fatalf("got (%q,%v), want (net_tx,true)", k, ok)
-	}
-	// receive direction
-	kr, okr := s.ResolveKey(func(k string) (string, bool) {
-		if k == "direction" {
-			return "receive", true
-		}
-		return "", false
-	})
-	if !okr || kr != "net_rx" {
-		t.Fatalf("got (%q,%v), want (net_rx,true)", kr, okr)
-	}
-	// unknown direction → drop
-	if _, ok := s.ResolveKey(func(string) (string, bool) { return "weird", true }); ok {
-		t.Fatal("unknown direction must drop")
-	}
-	// missing attr → drop
-	if _, ok := s.ResolveKey(func(string) (string, bool) { return "", false }); ok {
-		t.Fatal("missing direction attr must drop")
 	}
 }
 
@@ -111,7 +99,7 @@ func TestRegistry_NodeUsesKubeletstatsSingleValued(t *testing.T) {
 		t.Fatalf("k8s.node.memory.working_set spec wrong: %+v ok=%v", mem, ok)
 	}
 	net, ok := Lookup("k8s.node.network.io")
-	if !ok || net.Level != ingest.LevelNode || !net.Counter || net.SplitAttr != "direction" {
+	if !ok || net.Level != ingest.LevelNode || !net.Counter || net.Key != "net" || len(net.Labels) != 1 {
 		t.Fatalf("k8s.node.network.io spec wrong: %+v ok=%v", net, ok)
 	}
 	// multi-dimensional hostmetrics and the non-existent container network are dropped

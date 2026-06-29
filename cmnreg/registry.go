@@ -5,19 +5,21 @@
 // writes render-ready Redis Streams to the shared graph-redis.
 package cmnreg
 
-import "github.com/arrca-ai/arrca-metrics-commons/ingest"
+import (
+	"github.com/arrca-ai/arrca-metrics-commons/ingest"
+	"github.com/arrca-ai/arrca-metrics-commons/labels"
+)
 
 // MetricSpec declares how one OTLP metric is transformed and stored.
 type MetricSpec struct {
-	Key       string            // stream key: cpu|mem|net_rx|net_tx ("" when split)
-	Unit      string            // render-ready unit: cores|MB|B/s
-	Level     ingest.Level      // which attrs resolve the id
-	Counter   bool              // true → counter→rate; false → gauge as-is
-	SplitAttr string            // datapoint attr that fans this metric out (e.g. direction)
-	SplitMap  map[string]string // attr value → stream key
-	Scale     float64           // multiply the final value; 0 means identity (1.0)
-	Source    string            // g:meta "source" field
-	Limit     bool              // true → write to g:meta.limit (not a series)
+	Key     string             // stream base key: cpu|mem|net
+	Unit    string             // render-ready unit: cores|MB|B/s
+	Level   ingest.Level       // which attrs resolve the id
+	Counter bool               // true → counter→rate; false → gauge as-is
+	Labels  []labels.LabelSpec // identity-bearing labels (discovery model; e.g. net direction)
+	Scale   float64            // multiply the final value; 0 means identity (1.0)
+	Source  string             // g:meta "source" field
+	Limit   bool               // true → write to g:meta.limit (not a series)
 }
 
 const bytesToMB = 1.0 / (1024 * 1024)
@@ -31,13 +33,13 @@ var registry = map[string]MetricSpec{
 	// collector emits network only at pod/node level.
 	"k8s.pod.cpu.time":           {Key: "cpu", Unit: "cores", Level: ingest.LevelPod, Counter: true, Source: "daemonset"},
 	"k8s.pod.memory.working_set": {Key: "mem", Unit: "MB", Level: ingest.LevelPod, Scale: bytesToMB, Source: "daemonset"},
-	"k8s.pod.network.io":         {Unit: "B/s", Level: ingest.LevelPod, Counter: true, SplitAttr: "direction", SplitMap: map[string]string{"receive": "net_rx", "transmit": "net_tx"}, Source: "daemonset"},
+	"k8s.pod.network.io":         {Key: "net", Unit: "B/s", Level: ingest.LevelPod, Counter: true, Labels: []labels.LabelSpec{{Name: "direction", Attr: "direction"}}, Source: "daemonset"},
 	// Node usage comes from single-valued kubeletstats k8s.node.* metrics, NOT the
 	// multi-dimensional hostmetrics system.* (per cpu/state/device), which collapse
 	// many datapoints onto one series and break rate/value computation.
 	"k8s.node.cpu.usage":          {Key: "cpu", Unit: "cores", Level: ingest.LevelNode, Source: "kubeletstats"}, // gauge (cores), no rate
 	"k8s.node.memory.working_set": {Key: "mem", Unit: "MB", Level: ingest.LevelNode, Scale: bytesToMB, Source: "kubeletstats"},
-	"k8s.node.network.io":         {Unit: "B/s", Level: ingest.LevelNode, Counter: true, SplitAttr: "direction", SplitMap: map[string]string{"receive": "net_rx", "transmit": "net_tx"}, Source: "kubeletstats"},
+	"k8s.node.network.io":         {Key: "net", Unit: "B/s", Level: ingest.LevelNode, Counter: true, Labels: []labels.LabelSpec{{Name: "direction", Attr: "direction"}}, Source: "kubeletstats"},
 	// Limits (g:meta.limit). Only container limits are emitted; node allocatable is not.
 	"k8s.container.cpu_limit":    {Key: "cpu", Unit: "cores", Level: ingest.LevelContainer, Limit: true, Source: "cluster"},
 	"k8s.container.memory_limit": {Key: "mem", Unit: "MB", Level: ingest.LevelContainer, Scale: bytesToMB, Limit: true, Source: "cluster"},
@@ -49,19 +51,26 @@ func Lookup(name string) (MetricSpec, bool) {
 	return s, ok
 }
 
-// ResolveKey returns the stream key for a datapoint. Split metrics read SplitAttr
-// via getAttr and map it through SplitMap; non-split metrics return Key. ok=false
-// → drop the datapoint.
+// ResolveKey returns the base stream key for a datapoint. ok=false → drop.
 func (s MetricSpec) ResolveKey(getAttr func(string) (string, bool)) (string, bool) {
-	if s.SplitAttr == "" {
-		return s.Key, s.Key != ""
+	return s.Key, s.Key != ""
+}
+
+// IdentityLabels extracts the declared identity labels from a datapoint. ok=false
+// if any declared label's attr is absent (drop the datapoint). nil when none.
+func (s MetricSpec) IdentityLabels(getAttr func(string) (string, bool)) (map[string]string, bool) {
+	if len(s.Labels) == 0 {
+		return nil, true
 	}
-	v, ok := getAttr(s.SplitAttr)
-	if !ok {
-		return "", false
+	out := make(map[string]string, len(s.Labels))
+	for _, l := range s.Labels {
+		v, ok := getAttr(l.Attr)
+		if !ok {
+			return nil, false
+		}
+		out[l.Name] = v
 	}
-	k, ok := s.SplitMap[v]
-	return k, ok
+	return out, true
 }
 
 // EffScale is Scale, or 1.0 when Scale is zero.
