@@ -18,7 +18,6 @@ const (
 	fTs         = "ts"
 	fSource     = "source"
 	fSignal     = "signal"
-	fEndpoint   = "endpoint"
 	fState      = "state"
 	fDir        = "dir"
 	fBaseline   = "baseline"
@@ -45,7 +44,6 @@ func EncodeRow(e Event) []any {
 		fTs, strconv.FormatInt(e.TsMs, 10),
 		fSource, e.Source,
 		fSignal, e.Signal,
-		fEndpoint, e.Endpoint,
 		fState, e.State,
 		fDir, e.Direction,
 		fBaseline, ftoa(e.Baseline),
@@ -98,7 +96,6 @@ func DecodeRow(v map[string]interface{}) Event {
 	return Event{
 		Source:     get(fSource),
 		Signal:     get(fSignal),
-		Endpoint:   get(fEndpoint),
 		State:      get(fState),
 		Direction:  get(fDir),
 		Baseline:   atof(get(fBaseline)),

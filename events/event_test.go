@@ -9,7 +9,7 @@ import (
 func TestEventRoundTrip(t *testing.T) {
 	in := Event{
 		EntityID: "container:default/api-1/app", Source: "red", Signal: "p99_latency",
-		Endpoint: "0b3f7a9c", State: StateOnset, Direction: DirUp,
+		Labels: map[string]string{"endpoint": "0b3f7a9c"}, State: StateOnset, Direction: DirUp,
 		Baseline: 210, Current: 540, DeltaAbs: 330, DeltaRatio: 1.57,
 		Unit: "ms", TsMs: 1782547098597, IncidentID: "ab12cd34",
 	}

@@ -5,7 +5,7 @@ import "testing"
 
 func TestEncodeDecodeRowRoundTrip(t *testing.T) {
 	e := Event{
-		Source: "runtime", Signal: "jvm_heap_used", Endpoint: "",
+		Source: "runtime", Signal: "jvm_heap_used",
 		State: StateOnset, Direction: DirUp,
 		Baseline: 220, Current: 540, DeltaAbs: 320, DeltaRatio: 1.45,
 		Unit: "MB", TsMs: 1782547098597, SinceMs: 0, IncidentID: "ab12cd34",

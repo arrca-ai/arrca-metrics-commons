@@ -18,9 +18,8 @@ type Event struct {
 	EntityID   string  `json:"entityID"`
 	Source     string  `json:"source"` // "metrics" | "red" | "k8s" | "kafka"
 	Signal     string  `json:"signal"`
-	Endpoint   string  `json:"endpoint,omitempty"` // epHash; "" for metrics signals
-	State      string  `json:"state"`              // onset | recovered
-	Direction  string  `json:"direction"`          // up | down
+	State      string  `json:"state"`     // onset | recovered
+	Direction  string  `json:"direction"` // up | down
 	Baseline   float64 `json:"baseline"`
 	Current    float64 `json:"current"`
 	DeltaAbs   float64 `json:"deltaAbs"`
