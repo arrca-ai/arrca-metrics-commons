@@ -46,3 +46,18 @@ func TestSeriesKey_OrderIndependentAndDistinct(t *testing.T) {
 		t.Fatal("different resource must yield a different key")
 	}
 }
+
+func TestSeriesKey_ScopeDiscriminates(t *testing.T) {
+	res := mapOf(map[string]string{"k8s.namespace.name": "shop"})
+	dp := mapOf(map[string]string{})
+	base := SeriesKey(res, "scopeA", "v1", mapOf(map[string]string{}), "m", dp)
+	if SeriesKey(res, "scopeB", "v1", mapOf(map[string]string{}), "m", dp) == base {
+		t.Fatal("different scope name must change the key")
+	}
+	if SeriesKey(res, "scopeA", "v2", mapOf(map[string]string{}), "m", dp) == base {
+		t.Fatal("different scope version must change the key")
+	}
+	if SeriesKey(res, "scopeA", "v1", mapOf(map[string]string{"lib": "x"}), "m", dp) == base {
+		t.Fatal("different scope attrs must change the key")
+	}
+}

@@ -29,7 +29,7 @@ func SeriesKey(res pcommon.Map, scopeName, scopeVersion string, scopeAttrs pcomm
 	b.WriteString(scopeName)
 	b.WriteByte(skSepField)
 	b.WriteString(scopeVersion)
-	b.WriteByte(skSepField)
+	b.WriteByte(skSepRecord)
 	writeCanonicalMap(&b, scopeAttrs)
 	b.WriteByte(skSepRecord)
 	b.WriteString(metricName)
