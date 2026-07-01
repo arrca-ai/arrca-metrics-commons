@@ -37,7 +37,12 @@ func (h *HistTracker) Percentiles(key string, bounds []float64, cumCounts []uint
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	prev, seen := h.m[key]
-	h.m[key] = histState{bounds: bounds, cumCounts: cumCounts, updatedAt: now}
+	// Store defensive copies: bounds/cumCounts may be backed by a reused buffer
+	// (e.g. pdata's AsRaw), and the stored baseline must stay stable until the
+	// next sample diffs against it.
+	storedBounds := append([]float64(nil), bounds...)
+	storedCounts := append([]uint64(nil), cumCounts...)
+	h.m[key] = histState{bounds: storedBounds, cumCounts: storedCounts, updatedAt: now}
 
 	if len(bounds) == 0 || len(cumCounts) != len(bounds)+1 {
 		return nil, false // degenerate histogram
