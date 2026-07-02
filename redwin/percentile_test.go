@@ -37,12 +37,3 @@ func TestPercentileInfBucketReturnsLowerBound(t *testing.T) {
 		t.Fatalf("p50=%v want 100 (last finite bound)", p)
 	}
 }
-
-func TestPercentilesTriple(t *testing.T) {
-	counts := []uint64{0, 100, 0, 0}
-	bounds := []float64{10, 50, 100}
-	p50, p90, p99 := Percentiles(counts, bounds)
-	if !approx(p50, 30) || !approx(p90, 46) || !approx(p99, 49.6) {
-		t.Fatalf("got %v %v %v", p50, p90, p99)
-	}
-}

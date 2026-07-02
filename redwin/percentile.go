@@ -38,10 +38,3 @@ func Percentile(counts []uint64, boundsMs []float64, q float64) float64 {
 	}
 	return 0
 }
-
-// Percentiles returns p50/p90/p99 in one pass-friendly call.
-func Percentiles(counts []uint64, boundsMs []float64) (p50, p90, p99 float64) {
-	return Percentile(counts, boundsMs, 0.50),
-		Percentile(counts, boundsMs, 0.90),
-		Percentile(counts, boundsMs, 0.99)
-}

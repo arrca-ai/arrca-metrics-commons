@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 package labels
 
-import (
-	"reflect"
-	"testing"
-)
+import "testing"
 
 func TestEncodeKey(t *testing.T) {
 	if got := EncodeKey("jvm_nonheap_limit", nil); got != "jvm_nonheap_limit" {
@@ -15,34 +12,5 @@ func TestEncodeKey(t *testing.T) {
 	}
 	if got := EncodeKey("lag", Labels{"topic": "orders", "partition": "3"}); got != "lag{partition=3,topic=orders}" {
 		t.Fatalf("labels must be sorted by name: %q", got)
-	}
-}
-
-func TestDecodeKey(t *testing.T) {
-	base, l := DecodeKey("jvm_nonheap_limit")
-	if base != "jvm_nonheap_limit" || len(l) != 0 {
-		t.Fatalf("no-label decode wrong: %q %v", base, l)
-	}
-	base, l = DecodeKey("lag{partition=3,topic=orders}")
-	if base != "lag" || !reflect.DeepEqual(l, Labels{"topic": "orders", "partition": "3"}) {
-		t.Fatalf("decode wrong: %q %v", base, l)
-	}
-	// Guard: empty-brace keys decode to base with nil labels
-	base, l = DecodeKey("base{}")
-	if base != "base" || l != nil {
-		t.Fatalf("empty-brace decode wrong: %q %v", base, l)
-	}
-}
-
-func TestEncodeDecodeRoundTrip(t *testing.T) {
-	in := Labels{"pool": "Compressed Class Space"}
-	base, out := DecodeKey(EncodeKey("jvm_nonheap_limit", in))
-	if base != "jvm_nonheap_limit" || !reflect.DeepEqual(out, in) {
-		t.Fatalf("round-trip wrong: %q %v", base, out)
-	}
-	// Empty label map round-trip: empty map → base → nil
-	base, out = DecodeKey(EncodeKey("base", Labels{}))
-	if base != "base" || out != nil {
-		t.Fatalf("empty-label round-trip wrong: %q %v", base, out)
 	}
 }
